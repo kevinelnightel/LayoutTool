@@ -1,0 +1,521 @@
+﻿-- ============================================================================
+-- GridDataGet.pmlobj
+-- 表格数据采集对象：按视图范围采集 支吊架 / 管线 / 仪表 / 管口 的表格行数据
+--
+-- 【为什么需要这个对象】
+--   老版的表格数据来自表单 list 控件：先由标注流程（suppnote / mpipnote /
+--   minstapply / mvnozzapply）把行数据 setrows 进控件，表格方法再从控件 dtext 读出来画。
+--   新版 LayoutTool 的标注流程（LabelGenerator）并不维护这类控件，
+--   所以本次移植把"取数"从"画表"里分离出来，单独成对象：
+--       GridDataGet 负责取数  →  GridGenerator 负责画表
+--   两者都独立于表单，可被表单、宏或其它对象复用。
+--
+-- 【移植来源】老版 E:\DeepSeek\WorkSpace\PipeLayout\pipelayout.pmlfrm
+--   suppnote     1782-1831   支吊架：行 = [1]序号 [2]ATTA 的 flnn
+--   mpipnote     1651-1732   管线：  行 = [1]序号 [2]PIPE 的 flnn [3]'BOP.EL x.xxx m'
+--   minstapply   3238-3300   仪表：  行 = [1]序号 [2]INST 的 flnn [3]'EL x.xxxm'
+--   mvnozzapply  3671-3765   管口：  行 = [1]序号 [2]管口名 [3]描述 [4]方位角(度)
+--
+-- 【关键约定：表格序号必须与图面标注序号一致】
+--   本对象刻意使用与 LabelGenerator.Generate 完全相同的取数方式：
+--       · 同一个 LimitDbelementGet.GetDrawListElement(类型)
+--       · 同一套支吊架过滤条件（attype 含 *SUPP* 或 *HANG*）
+--       · 相同的列表顺序（即 序号 = 在该列表中的位置）
+--   这样图面上标注的 1、2、3… 与表格里的 1、2、3… 才能对上。
+--   ⚠ 已知不一致风险：新版 LabelGenerator 第 52-57 行在正向遍历中 DeleteFrom 删元素，
+--     索引错位可能漏检，导致其编号顺序与本对象（稳定顺序）不一致。
+--     该缺陷已在 PORTING_LOG.md 第 3 节列为待修项，修好后序号即完全一致。
+--
+-- 【刻意修正（相对老版）】
+--   1. 老版"取数"依赖表单控件、且必须在标注流程之后执行；本对象可独立调用。
+--   2. 老版支吊架过滤在正向遍历中删元素（索引错位漏检）；本对象改为"重建保留数组"。
+--   3. 老版管口序号用管口循环下标，跳过"与设备中心重合的管口"时会出现序号空洞；
+--      本对象改为连续序号。
+--   4. 老版取 aod/pos 失败时用 handle any + skip 直接丢弃该行；本对象改为
+--      在表格里留空，保证行数与序号连续、便于人工核对。
+-- ============================================================================
+define object GridDataGet
+	-- 目标 VIEW（必须）
+	member	.view		is	dbref
+	-- 可选：指定设备（管口表用）；不设置时取视图范围内所有设备
+	member	.element	is	dbref
+	-- 相对标高(mm)，对应老版 relative / instrelative 输入框
+	member	.relative	is	real
+	--【本次新增·按你的要求】管口表（kind = 'NOZZ'）第 4 列的模式：
+	--   'HORIZONTAL' = 管口标高（相对设备，老版 mhnozzapply 3620）；
+	--   其它/未设置   = 方位角（老版 mvnozzapply，默认行为不变）。
+	--【报错修复】(2,759) Object does not have a member NOZZORIE
+	--   23.81 那次只写了上面这几行注释、**漏了下面这条成员声明**，
+	--   于是 `!gridData.nozzOrie = ...` 在运行时报"对象没有这个成员"。现在补上。
+	member	.nozzOrie	is	string
+endobject
+------------------------------------------------------------------------------
+-- 由"管件或支管"算出 BOP 标高（米）；取不到就返回 -1
+--   BOP = (元素标高 − 管径/2 − 相对标高) / 1000
+--
+--【本次新增·按你的指导】管径的取法改为**两级**：
+--   ① 先取 `aod`（管件上的一般写法）；
+--   ② 取不到就取 `phod` —— **BRAN（支管）上没有 aod，但有 phod/ptod**
+--      （PHOD = Piping Head Outside Diameter，头端外径；AVEVA 自己就大量这么用：
+--       pipetappingconnection.pmlobj 401 `!this.connectedBranch.phod`、
+--       pipeSlopeBranchLeg.pmlobj 2435 `max(!this.branch.phod, !this.branch.ptod)/2`）。
+--   位置同理：`pos` 取不到就整体算失败（返回 -1），由调用方留空。
+define method .BopFromElement(!elem is dbref) is real
+	!elemType = !elem.type
+	!ok = true
+	--【重要】必须先判类型再取属性：
+	--   · **BRAN 没有 `pos`**（和 PIPE 一样），直接写 `!elem.pos.wrt(world)` 会得到
+	--     `(2,779) Method <ERROR>.WRT(<DBREF>) not found`；
+	--     更要命的是这个错**`handle any` 兜不住**（实测 23.38）—— 属性取不到时 PML 会给一个
+	--     "ERROR 值"，对 ERROR 值再调方法就直接抛错，绕过 handler。
+	--     所以凡是可能取不到的属性，一律**先用 `!elem.type` 把元素类型分开**，不靠 handle 擦。
+	--   · BRAN 用 `hpos`（头端位置）+ `phod`（头端外径）；
+	--   · 管件用 `pos` + `aod`；`aod` 取不到（垫片之类）再退 `phod`。
+	if(!elemType eq 'BRAN')then
+		!elemPos = !elem.hpos.wrt(world)
+		!od = !elem.phod
+		-- 【PML 语义提醒】handle 覆盖它前面的语句，处理体内只写兜底
+		handle any
+			!ok = false
+		endhandle
+	else
+		!elemPos = !elem.pos.wrt(world)
+		!od = !elem.aod
+		handle any
+			!ok = false
+		endhandle
+		if(!ok.not())then
+			!ok = true
+			!od = !elem.phod
+			handle any
+				!ok = false
+			endhandle
+		endif
+	endif
+	if(!ok.not())then
+		return -1
+	endif
+	!bop = (!elemPos.up - !od / 2 - !this.relative) / 1000
+	return !bop
+endmethod
+-----------------------------------------------------------------------------
+-- 统一入口：按类型取行
+--   !kind = 'SUPP' | 'PIPE' | 'INST' | 'NOZZ'
+--
+--【本次新增·按你的要求】取数阶段也带**进度条 + 标题**（与标注流程 LabelGenerator 一致）：
+--   · 标题 `!!fmsys.SETPROGRESSTEXT(<英文>)`：进度的"标题行"就是它；
+--   · 百分比 `!!fmsys.SETPROGRESS(!percent)`：在各自的取数循环里逐条更新；
+--   · 结束再置 0（与 LabelGenerator 各段结尾的写法一致）。
+--   标题文字用**英文**：中文在进度栏会时而乱码（见 PORTING_LOG 23.20），
+--   所以这里也沿用那次的结论。
+--   本方法只负责"取数"这一段；画表那一段的进度在 GridGenerator 里。
+define method .GetRows(!kind is string) is array
+	!title = 'Collecting table data ...'
+	if(!kind eq 'SUPP')then
+		!title = 'Collecting support table data (SUPP) ...'
+	elseif(!kind eq 'PIPE')then
+		!title = 'Collecting pipe table data (PIPE) ...'
+	elseif(!kind eq 'INST')then
+		!title = 'Collecting instrument table data (INST) ...'
+	elseif(!kind eq 'NOZZ')then
+		!title = 'Collecting nozzle table data (NOZZ) ...'
+	elseif(!kind eq 'EQUI')then
+		!title = 'Collecting equipment table data (EQUI) ...'
+	endif
+	!!fmsys.SETPROGRESSTEXT(!title)
+	!!fmsys.SETPROGRESS(0)
+	-- 未知类型时保持空数组（与原逻辑一致：原来每个分支直接 return，
+	-- 现在统一先建空数组再按类型覆盖，行为不变）
+	!rows = object array()
+	if(!kind eq 'SUPP')then
+		!rows = !this.GetSuppRows()
+	elseif(!kind eq 'PIPE')then
+		!rows = !this.GetPipeRows()
+	elseif(!kind eq 'INST')then
+		!rows = !this.GetInstRows()
+	elseif(!kind eq 'NOZZ')then
+		!rows = !this.GetNozzleRows()
+	elseif(!kind eq 'EQUI')then
+		!rows = !this.GetEquiRows()
+	endif
+	!!fmsys.SETPROGRESS(0)
+	return !rows
+endmethod
+------------------------------------------------------------------------------
+-- 支吊架表数据行
+--   行 = [1]序号(string) [2]ATTA 全名(flnn)
+-- 过滤条件与 LabelGenerator.Generate 第 52-57 行一致：attype 含 *SUPP* 或 *HANG*
+define method .GetSuppRows() is array
+	!limitGet = object LimitDbelementGet()
+	!limitGet.view = !this.view
+	!list = !limitGet.GetDrawListElement('ATTA')
+	-- 【修正】老版（以及新版 LabelGenerator）在正向遍历里 DeleteFrom 删元素，
+	-- 索引错位会漏检；这里改为重建"保留数组"，顺序稳定、不漏元素。
+	!keep = object array()
+	do !i indices !list
+		if(!list[$!i].attype.matchwild(|*SUPP*|) or !list[$!i].attype.matchwild(|*HANG*|))then
+			!keep.append(!list[$!i])
+		endif
+	enddo
+	!result = object array()
+	do !i indices !keep
+		--【本次新增】进度条：按已处理条数更新百分比
+		!percent = !i / !keep.size() * 100
+		!!fmsys.SETPROGRESS(!percent)
+		!row = object array()
+		!row[1] = !i.string('D0')
+		!row[2] = !keep[$!i].flnn
+		--【本次新增】第 3 列：支架标高(m) —— 按你的要求取支架 pos.wrt(world) 再 ÷1000 换成米
+		--   （取不到位置时该行留空，不影响其它列与行数）
+		!elevOk = true
+		!supPos = !keep[$!i].pos.wrt(world)
+		--【本次新增·按你的要求】减相对标高(mm)：与 BopFromElement / 仪表标高同一口径
+		!relZ = !this.relative
+		if(!relZ.unset())then
+			!relZ = 0
+		endif
+		!supElev = (!supPos.up - !relZ) / 1000
+		-- 【PML 语义提醒】handle 覆盖它前面的语句，处理体内只写兜底
+		handle any
+			!elevOk = false
+		endhandle
+		if(!elevOk)then
+			--【报错修复·同一类坑】带单位的数值，.string() 会把单位一起打出来：
+			--   !supElev 是 mm 量纲（pos.up ÷ 1000 只是换数值、量纲仍是 mm），
+			--   原来的 `!supElev.string('D3')` 会得到 '12.345mm' 塞进"标高(m)"那一列。
+			--   这里按本工程既有写法（老版 pipelayout 1247/3287 的 .before('mm')）剥掉 'mm'，
+			--   再补上正确的单位 ' m'。
+			--【本次修改·按你的反馈】原来剥掉 'mm' 之后就只留光数字（没单位），而管线表 BOP 那列
+			--   写的是 'BOP.EL 12.345 m'（带单位）—— 两张表不一致。现在统一成"数字 + 空格 + m"：
+			--     支架表：'12.345 m'
+			--     管线表：'BOP.EL 12.345 m'（保持原样）
+			--   （仪表表原来就是 'EL 12.345m'，带单位，未改动。）
+			!elevText = !supElev.string('D3')
+			if(!elevText.match(|mm|) gt 0)then
+				!elevText = !elevText.before('mm')
+			endif
+			!row[3] = !elevText + ' m'
+		else
+			!row[3] = ''
+		endif
+		!result.append(!row)
+	enddo
+	return !result
+endmethod
+------------------------------------------------------------------------------
+-- 管线表数据行
+--   行 = [1]序号(string) [2]PIPE 全名(flnn) [3]'BOP.EL x.xxx m'
+-- BOP 算法与老版 mpipnote 1725-1726 完全一致：
+--   bop = (管中心标高 - 管外径/2 - 相对标高) / 1000
+--   （即"管底标高"，单位换算成米；管外径 aod 由 Draft 属性提供）
+define method .GetPipeRows() is array
+	!limitGet = object LimitDbelementGet()
+	!limitGet.view = !this.view
+	!list = !limitGet.GetDrawListElement('PIPE')
+	-- 视图范围（用于挑"落在图面范围内"的管件取 BOP，整张表只算一次）
+	!vol = !limitGet.GetVolume()
+	!result = object array()
+	!rowNo = 0
+	do !i indices !list
+		--【本次新增】进度条
+		!percent = !i / !list.size() * 100
+		!!fmsys.SETPROGRESS(!percent)
+		!pipe = !list[$!i]
+		!rowNo = !rowNo + 1
+		!row = object array()
+		-- 序号用自己的计数器：保证 1..N 连续（不跳过元素时与循环下标等价）
+		!row[1] = !rowNo.string('D0')
+		!row[2] = !pipe.flnn
+		-- BOP 标高。老版 mpipnote 是在**管件**层级取 pos 与 aod 算的：
+		--   bop = (管件标高 - 管件 aod/2 - 相对标高) / 1000
+		-- 【重要修正1】PIPE 元素本身**没有 pos 属性** —— 直接写 `!pipe.pos.wrt(world)` 会报
+		--   (2,779) Method <ERROR>.WRT(<DBREF>) not found。必须下到 BRAN → 管件层级取值。
+		-- 【重要修正2】优先取**落在视图范围内的管件**（与图面标注取点口径一致），
+		--   否则管道起点在视图外时会取到图面上根本没画的那一段的标高；
+		--   范围内一个管件都没有时，才退回用第一个管件。
+		!bopOk = false
+		!pipeName = !pipe.flnn
+		--【本次新增】把支管里所有非 ATTA 管件收集起来，兜底时逐个试
+		!allComps = object array()
+		--【本次新增】支管本身也收集起来：`-CONN` 这类支管里一个管件都没有，
+		--   这时按你的指导，落在 **BRAN 自己**身上取（hpos + phod）
+		!allBrans = object array()
+		!branCount = 0
+		!compCount = 0
+		-- 【重要修正3】不要把**名字字符串**代入命令去取子元素：
+		--   本项目的管道名形如 `25^^-FG-0301-16A1-ET40`（数字开头/含特殊字符），
+		--   写 `coll all branch for $!pipeName` 会报 (47,15) CP: Syntax error。
+		--   改用对象接口 `!元素.members` 取**直接**子元素：
+		--   PIPE 的直接子元素就是 BRAN，BRAN 的直接子元素就是管件 + ATTA —— 全程不做字符串代入。
+		!brans = !pipe.members
+		do !b indices !brans
+			if(!brans[$!b].type ne 'BRAN')then
+				skip
+			endif
+			!branCount = !branCount + 1
+			-- 【注意】`.members` 返回的**已经是 dbref**，不能再调 .dbref()
+			--（只有 coll 返回的"集合元素"才需要 .dbref()；对 dbref 调 .dbref() 会报
+			--  (2,779) Method <DBREF>.DBREF() not found）
+			!bran = !brans[$!b]
+			--【本次修正·按你的指导】支管**一律**登记为"位置兜底"候选：
+			--   支管取位置不是 `pos` 而是 **`hpos`（头端位置）**，管径用 **`phod`（头端外径）**，
+			--   两者在 BopFromElement 里已按元素类型分开处理（BRAN → hpos + phod）。
+			--   上一版我怕"没有几何的支管取不到 hpos"而只登记"含真实管件"的支管，
+			--   结果 `-CONN` 那批（支管里只有 ATTA、没有管件）拿不到标高。你确认它们
+			--   同样可以用 hpos + phod 算，所以这里**放开限制**。
+			!allBrans.append(!bran)
+			!comps = !bran.members
+			do !c indices !comps
+				if(!comps[$!c].type eq 'ATTA')then
+					skip
+				endif
+				!comp = !comps[$!c]
+				!compCount = !compCount + 1
+				!allComps.append(!comp)
+				if(!bopOk)then
+					skip
+				endif
+				--【本次修正·按你的反馈】原来只要第一个"范围内"的管件取不出位置/管径，
+				--   这条管线就永远留空；现在逐个试范围内的管件，任意一个算出 BOP 就采用。
+				!inRange = !limitGet.IsPointWithinLimit(!comp.pos,!vol)
+				if(!inRange)then
+					-- 管径 aod 取不到时会自动改用 phod（见 BopFromElement）
+					--【报错修复】(23.37) BopFromElement **失败时返回 -1**，
+					--   所以只有 `>= 0` 才是"算出了标高"。上一版写成 `lt 0`，
+					--   等于"失败才算成功"，把全部正常管线都丢成空值了。
+					!bop = !this.BopFromElement(!comp)
+					if(!bop ge 0)then
+						!bopOk = true
+					endif
+				endif
+			enddo
+		enddo
+		-- 范围内没有能算出 BOP 的管件（例如管道只是从图面穿过）→ 逐个试所有管件兜底
+		--【本次修正】原来是"只试第一个非 ATTA 管件"，若那一个恰好没有位置/管径就白留空格。
+		if(!bopOk.not())then
+			do !k indices !allComps
+				if(!bopOk)then
+					skip
+				endif
+				!cand = !allComps[$!k]
+				-- 同上：`>= 0` 才是成功（-1 表示失败）
+				!bop = !this.BopFromElement(!cand)
+				if(!bop ge 0)then
+					!bopOk = true
+				endif
+			enddo
+		endif
+		--【本次新增·按你的指导】管件都取不到时，退回**支管自己**：
+		--   `-CONN` 这类支管里只有 ATTA（没有管件），但它有 hpos（头端位置）和 phod（管径），
+		--   足够算出该处标高。这也是"选中对象是 branch 就用 phod"的落地。
+		if(!bopOk.not())then
+			do !kb indices !allBrans
+				if(!bopOk)then
+					skip
+				endif
+				!bran2 = !allBrans[$!kb]
+				!bop = !this.BopFromElement(!bran2)
+				if(!bop ge 0)then
+					!bopOk = true
+				endif
+			enddo
+		endif
+		if(!bopOk)then
+			!row[3] = 'BOP.EL ' + !bop.string('D3').before('mm') + ' m'
+		else
+			-- 取不到位置/管径时留空，保持行数与序号连续
+			!row[3] = ''
+			--【临时诊断】把"没有标高"的管线名与原因打出来，便于判断属于哪一种情况：
+			--   no BRAN member                      → 该 PIPE 下面没有支管
+			--   branch has no piping component      → 支管里只有 ATTA（附件），没有管件
+			--   position/diameter unavailable       → 有管件，但 pos 取不到，
+			--                                          或 aod 与 phod **都**取不到
+			!skipReason = 'position/diameter unavailable on comp or branch (aod and phod both failed)'
+			if(!branCount lt 1)then
+				!skipReason = 'no BRAN member'
+			elseif(!compCount lt 1)then
+				!skipReason = 'branch has no piping component'
+			endif
+			!noBopMsg = 'No BOP (blank elevation) - ' + !pipeName + ' / ' + !skipReason
+		endif
+		!result.append(!row)
+	enddo
+	return !result
+endmethod
+------------------------------------------------------------------------------
+-- 仪表点位表数据行
+--   行 = [1]序号(string) [2]INST 全名(flnn) [3]'EL x.xxxm'
+-- 标高算法与老版 minstapply 3285-3287 完全一致：
+--   elevation = (仪表位置标高 - 相对标高) / 1000
+define method .GetInstRows() is array
+	!limitGet = object LimitDbelementGet()
+	!limitGet.view = !this.view
+	!list = !limitGet.GetInstInView()
+	!result = object array()
+	do !i indices !list
+		--【本次新增】进度条
+		!percent = !i / !list.size() * 100
+		!!fmsys.SETPROGRESS(!percent)
+		!inst = !list[$!i]
+		!row = object array()
+		!row[1] = !i.string('D0')
+		!row[2] = !inst.flnn
+		!elevOk = true
+		!instpos = !inst.pos.wrt(world)
+		!elevation = (!instpos.up - !this.relative) / 1000
+		-- 同 GetPipeRows：危险语句在前，handle 只作兜底
+		handle any
+			!elevOk = false
+		endhandle
+		if(!elevOk)then
+			!row[3] = 'EL ' + !elevation.string('D3').before('mm') + 'm'
+		else
+			!row[3] = ''
+		endif
+		!result.append(!row)
+	enddo
+	return !result
+endmethod
+------------------------------------------------------------------------------
+-- 管口方位表数据行
+--   行 = [1]序号(string) [2]管口名(去设备名前缀) [3]描述(desc) [4]方位角(度, 自北顺时针)
+-- 方位角算法与老版 mvnozzapply 3737-3759 完全一致：
+--   1) 以设备位置为中心、管口位置（取同一标高投影到水平面）为端点作直线；
+--   2) 该直线与正北方向的夹角 = 方位角，取整；
+--   3) 管口在设备中心以西时，方位角 = 360 - 方位角（保证自北顺时针）；
+--   4) 若管口正好落在设备中心（线长为 0，Direction() 抛 2,785），老版跳过该管口，
+--      本对象保持同样行为（跳过），避免表里出现 0° 的假数据。
+define method .GetNozzleRows() is array
+	--【本次修改·按你的要求】管口表的数据来源改成与"管口方位标注"**同一条路**：
+	--   从视图 AddList 收设备（未显式指定 element 时）→ 每台设备 coll all nozz → 逐管口算方位角。
+	--   原来走的是 `GetDrawListElement('EQUI')` + `!equi.members`：你们模型的 DrawList 里放的是
+	--   设备/区域，管口也不在设备直属下 → 取不到数据 → 表格报 "No NOZZ data found in this view."。
+	--   现在直接复用 NozzleOrientationGenerator 的 EquisFromView() / NozzlesOfEqui() / NozzleAngle()，
+	--   与标注共用同一套取数和同一个角度算法（也顺带解决本文件头 14.5 那条"算法内联重复"的待办）。
+	--   注：NozzleAngle() 用的是世界坐标构造直线、失败时返回 -1，所以不会再踩 (2,869)/(2,766)。
+	!vo = object NozzleOrientationGenerator()
+	!vo.view = !this.view
+	!equiList = object array()
+	if(!this.element.unset().not())then
+		!equiList.append(!this.element)
+	else
+		!equiList = !vo.EquisFromView()
+	endif
+	--【2026-10-31·修】管口图的视图往往靠“范围”而不是 AddList 围起来的，
+	--   EquisFromView() 读的是 view 的 ADDE 成员，空的时候就一行也出不来。
+	--   因此补一个兜底：取不到就按**视图范围内的设备**取。
+	if(!equiList.size() lt 1)then
+		!ldgN = object LimitDbelementGet()
+		!ldgN.view = !this.view
+		!equiList = !ldgN.GetEquiInView()
+	endif
+	!result = object array()
+	!num = 0
+	do !i indices !equiList
+		--【本次新增】进度条
+		!percent = !i / !equiList.size() * 100
+		!!fmsys.SETPROGRESS(!percent)
+		!equi = !equiList[$!i]
+		!vo.equi = !equi
+		--【本次修改】每台设备上 coll all nozz（取不到再退回子树搜索，与标注一致）
+		!nozzs = !vo.NozzlesOfEqui(!equi)
+		!equiShort = !equi.name
+		do !j indices !nozzs
+			!nozz = !nozzs[$!j]
+			--【本次新增·按你的要求】第 4 列内容按模式分两种：
+			--   卧式（'HORIZONTAL'）= 管口标高（相对设备），老版 mhnozzapply 3620：
+			--      !temp[4] = !nozzs[..].dbref().pos.wrt(!equiname.dbref()).up.string('D2')
+			--   立式/默认 = 方位角（复用标注的同一个方法；取不到返回 -1 → 该管口不出行）
+			!col4 = ''
+			!useRow = false
+			if(!this.nozzOrie eq 'HORIZONTAL')then
+				!elOk = true
+				!elev = !nozz.pos.wrt(!equi).up.string('D2')
+				handle any
+					!elOk = false
+				endhandle
+				if(!elOk)then
+					!col4 = !elev
+					!useRow = true
+				endif
+			else
+				!angle = !vo.NozzleAngle(!nozz)
+				if(!angle ge 0)then
+					!col4 = !angle.string('D0')
+					!useRow = true
+				endif
+			endif
+			if(!useRow)then
+				!num = !num + 1
+				!row = object array()
+				!row[1] = !num.string('D0')
+				-- 管口名：去掉设备名前缀（老版 3755），取不到时保留原名
+				!nozzName = !nozz.name
+				!shortName = !nozzName.after(!equiShort + '-')
+				-- 分两层判断，不依赖 and 的短路行为（unset 时取 .length() 会报错）
+				!shortOk = false
+				if(!shortName.unset())then
+					!shortOk = false
+				elseif(!shortName.length() gt 0)then
+					!shortOk = true
+				endif
+				if(!shortOk)then
+					!nozzName = !shortName
+				endif
+				!row[2] = !nozzName
+				!row[3] = !nozz.desc
+				!row[4] = !col4
+				!result.append(!row)
+			endif
+		enddo
+	enddo
+	!!fmsys.SETPROGRESS(0)
+	return !result
+endmethod
+------------------------------------------------------------------------------
+--【本次新增·按你的要求】设备表数据行（EquiLayout 设备布置图用）
+--   行 = [1]设备名 [2]描述 [3]标高(m，已减相对标高)
+--   取数口径与 NoteGenerator / 设备标注一致：
+--     LimitDbelementGet.GetDrawListElement('EQUI') + IsPointWithinLimit(视图范围)
+define method .GetEquiRows() is array
+	!limitGet = object LimitDbelementGet()
+	!limitGet.view = !this.view
+	--【本次修改·按你的要求】改用唯一口径（.pos.wrt(world) 判定，与标注/尺寸同一套）
+	!list = !limitGet.GetEquiInView()
+	!volume = !limitGet.GetVolume()
+	!result = object array()
+	!num = 0
+	do !i indices !list
+		--【本次新增】进度条
+		!percent = !i / !list.size() * 100
+		!!fmsys.SETPROGRESS(!percent)
+		!equi = !list[$!i]
+		!num = !num + 1
+		!row = object array()
+		--【本次修改·按你的要求】设备名取 **FLNN**（.name 会带 / 号）
+		!row[1] = !equi.flnn
+		!row[2] = !equi.desc
+		-- 标高：与支架表同一口径（元素标高 - 相对标高）/1000，单位 m
+		!relZ = !this.relative
+		if(!relZ.unset())then
+			!relZ = 0
+		endif
+		!elevOk = true
+		!elev = (!equi.pos.wrt(world).up - !relZ) / 1000
+		-- 【PML 语义提醒】handle 覆盖它前面的语句，处理体内只写兜底
+		handle any
+			!elevOk = false
+		endhandle
+		if(!elevOk)then
+			!elevText = !elev.string('D3')
+			if(!elevText.match(|mm|) gt 0)then
+				!elevText = !elevText.before('mm')
+			endif
+			!row[3] = !elevText + ' m'
+		else
+			!row[3] = ''
+		endif
+		!result.append(!row)
+	enddo
+	return !result
+endmethod

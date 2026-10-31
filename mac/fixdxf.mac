@@ -1,0 +1,39 @@
+﻿-- fixdxf.mac - clean one DXF in place (manual entry).
+-- DrawingExporter.pmlobj calls the cleaner automatically after each DXF export;
+-- use this macro to fix a file you already have.
+--
+-- Usage:
+--   !!dxfFixPath = 'D:\DRAW-S.dxf'
+--   $m E:\AVEVA\Addin\PMLLIB\LayoutTool\macixdxf.mac
+--
+-- 2026-10-31: 不写绝对路径。PMLLIB 是分号分隔的根列表，用 for /f 取第一段；
+-- 目标路径写进请求文件（SYSCOM 命令行不能带 $! 变量，见 ERRORS E-18）。
+
+!p = !!dxfFixPath
+if (!p.unset()) then
+	$P fixdxf: set !!dxfFixPath first, e.g. !!dxfFixPath = 'D:\DRAW-S.dxf'
+else
+	var !mls EVAR PMLLIB
+	!root = !mls
+	if (!mls.match(';') gt 0) then
+		!root = !mls.before(';')
+	endif
+	!req = !root & 'LayoutTool\mac\dxf_fix_req.txt'
+	!lines = object ARRAY()
+	!lines.Append(!p)
+	!ok = true
+	!f = object FILE(!req)
+	!f.writeFile('OVERWRITE', !lines)
+	handle any
+		!ok = false
+	endhandle
+	if (!ok) then
+		syscom |cmd /c for /f "tokens=1 delims=;" %i in ("%PMLLIB%") do @call "%i.\LayoutTool\mac\dxf_fix.bat"|
+		handle any
+			!ok = false
+		endhandle
+		$P fixdxf: processed $!p (details in LayoutTool\mac\dxf_fix.log)
+	else
+		$P fixdxf: FAILED on $!p
+	endif
+endif

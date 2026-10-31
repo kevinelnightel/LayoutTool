@@ -1,0 +1,407 @@
+﻿define object SheetGenerator
+	--用来在draft里生成图面
+	member	.drawingName			is	string
+	member	.sheetName				is	string
+	member	.sheetSize				is	string
+	member	.viewPositionFrom		is	position
+	member	.viewPositionTo			is	position
+	member	.viewSize				is	array
+	member	.viewPosition			is	array
+	member	.viewDirection			is	string
+	member	.viewScale				is	string
+	member	.viewType				is	string
+
+
+endobject
+---------------------------------------------------------------------------
+--生成
+define method .Generate(!message is string)
+	!drawingName		=		!this.drawingName
+	!sheetName			=		!this.sheetName
+	!sheetSize			=		!this.sheetSize
+	
+	!viewCenterPosition	=		!this.viewPositionFrom.MidPoint(!this.viewPositionTo)
+	!viewPositionFrom	=		!this.viewPositionFrom
+	!viewPositionTo		=		!this.viewPositionTo
+	!xsize				=		!this.viewSize[1]
+	!ysize				=		!this.viewSize[2]
+	!scale				=		!this.viewScale
+	!viewCenterX		=		!this.viewPosition[1]
+	!viewCenterY		=		!this.viewPosition[2]
+	!viewDirection		=		!this.viewDirection
+	!viewType			=		!this.viewType
+	!viewName			=		!this.sheetName + '/V'
+	if(!message eq 'SHEE')then
+		!this.GenerateSheet(!sheetName,!sheetSize)			$*生成SHEE
+	endif
+	!this.GenerateView(!drawingName,!viewName,!viewDirection,!viewCenterPosition,!scale,!viewType,!xsize,!ysize,!viewCenterX,!viewCenterY)
+	!this.GenerateVsection(!drawingName,!viewName,!viewPositionFrom,!viewPositionTo)
+	!this.GenerateLaye(!viewName,!viewDirection,!viewCenterX,!viewCenterY)
+	!this.sheetupdate()
+endmethod
+---------------------------------------------------------------------------
+--新建一个Sheet
+define method .GenerateSheet(!sheetName is string,!sheetSize is string)		
+	NEW SHEET /$!sheetName
+	SIZE $!sheetSize
+	POSFOR ENU
+endmethod
+---------------------------------------------------------------------------
+define method .GenerateView(!drawingName is string,!viewName is string,!viewDirection is string,!viewCenterPosition is position,!scale is string,!viewType is string,!xsize is string,!ysize is string,!viewCenterX is string,!viewCenterY is string)
+	--新建一个View
+	NEW VIEW /$!viewName
+	DIR $!viewDirection
+	THPO $!viewCenterPosition
+	VRAT 1mm $!scale mm
+	VTYP $!viewType
+
+	SIZE $!xsize $!ysize
+	XYPS X $!viewCenterX Y $!viewCenterY
+	LFRA true
+	NLSTYL Solid
+	NLCOLO 1
+	POSFOR ENU
+	
+	--关联Drawlist
+	IDLN IDLIST /$!drawingName/DRAWLIST/DRWG
+	--关联颜色规则
+	RRSF RRST /$!drawingName/REPR/ALL
+	--关联消隐规则
+	Hrsf HRST /$!drawingName/HRUL/ALL
+endmethod	
+---------------------------------------------------------------------------	
+--新建六个切面
+define method .GenerateVsection(!drawingName is string,!viewName is string,!viewPositionFrom is position,!viewPositionTo is position)
+	--新建六个视角
+	NEW VSECTION /$!viewName/VSEC/UP
+	NEW VSECTION /$!viewName/VSEC/DOWN
+	NEW VSECTION /$!viewName/VSEC/EAST
+	NEW VSECTION /$!viewName/VSEC/WEST
+	NEW VSECTION /$!viewName/VSEC/NORTH
+	NEW VSECTION /$!viewName/VSEC/SOUTH
+	--新建六个切面
+	/$!drawingName/LIBY
+	NEW PLLB /$!viewName/PLANES
+	NEW FPLANE /$!viewName/FPLA/WEST
+	POS $!viewPositionFrom
+	NORM E
+	NEW FPLANE /$!viewName/FPLA/SOUTH
+	POS $!viewPositionFrom
+	NORM N
+	NEW FPLANE /$!viewName/FPLA/DOWN
+	POS $!viewPositionFrom
+	NORM U
+	NEW FPLANE /$!viewName/FPLA/EAST
+	POS $!viewPositionTo
+	NORM W
+	NEW FPLANE /$!viewName/FPLA/NORTH
+	POS $!viewPositionTo
+	NORM S
+	NEW FPLANE /$!viewName/FPLA/UP
+	POS $!viewPositionTo
+	NORM D
+	--关联六个面
+	/$!viewName/VSEC/UP
+	PLRF FPLANE /$!viewName/FPLA/UP
+	IDLN WORLD /*
+	/$!viewName/VSEC/DOWN
+	PLRF FPLANE /$!viewName/FPLA/DOWN
+	IDLN WORLD /*
+	/$!viewName/VSEC/WEST
+	PLRF FPLANE /$!viewName/FPLA/WEST
+	IDLN WORLD /*
+	/$!viewName/VSEC/EAST
+	PLRF FPLANE /$!viewName/FPLA/EAST
+	IDLN WORLD /*
+	/$!viewName/VSEC/NORTH
+	PLRF FPLANE /$!viewName/FPLA/NORTH
+	IDLN WORLD /*
+	/$!viewName/VSEC/SOUTH
+	PLRF FPLANE /$!viewName/FPLA/SOUTH
+	IDLN WORLD /*
+endmethod
+---------------------------------------------------------------------------	
+define method .GenerateLaye(!viewName is string,!viewDirection is string,!viewCenterX is string,!viewCenterY is string)
+	--新建必要的图层
+	NEW LAYER /$!viewName/USER_Equip_Dims
+	--DIR $!viewDirection
+	PURP EDIA
+	UCOD mm  Distance   mm  Bore Nominal
+	FONT 11
+	LTER Off
+	JUST Left
+	ALIGN Bbody
+	DTER Arrows
+	TSIZ 2.5mm
+	CHOS 6mm
+	ASUB 0degree
+	PJUS Towards
+	OSHT 2mm
+	PLCL 0mm
+	DOFF 25mm
+	DMSP 0mm
+	CHEI 2mm
+	LLEA true
+	LFRA true
+	LSHA Straight
+	GBOX 1mm
+	CSPA 0
+	LSPA 0
+	LLCL 0mm
+	XYPS 25mm 25mm
+	BPOF 0mm 0mm
+	BLNK true
+	BMAR 0mm
+	FTER Default
+	PCODE mms to 0 dpls  Inches to 1 dpls  Fractions to 32 ths  Angles to 1 dpls
+	NTEXT unset
+	TXCOLO 10
+	NLSTYL Solid
+	NLCOLO 1
+	FSTYLE Off
+	FCOLOUR 1
+	LLSTYL Solid
+	LLCOLO 1
+	LFSTYL Solid
+	LFCOLO 1
+	DLSTYL Solid
+	DLCOLO 10
+	PLSTYL Solid
+	PLCOLO 10
+	MSTYLE Off
+	MCOLOUR 1
+	CHSTYL Off
+	CHCOLO 1
+	POSFOR ENU
+	
+	NEW LAYER /$!viewName/USER_Dims
+	--DIR $!viewDirection
+	PURP DIMA
+	UCOD mm  Distance   mm  Bore Nominal
+	FONT 11
+	LTER Off
+	JUST Left
+	ALIGN Bbody
+	DTER Arrows
+	TSIZ 2.5mm
+	CHOS 6mm
+	ASUB 0degree
+	PJUS Towards
+	OSHT 2mm
+	PLCL 0mm
+	DOFF 25mm
+	DMSP 0mm
+	CHEI 2.5mm
+	LLEA true
+	LFRA true
+	LSHA Straight
+	GBOX 1mm
+	CSPA 0
+	LSPA 0
+	LLCL 0mm
+	XYPS 25mm 25mm
+	BPOF 0mm 0mm
+	BLNK true
+	BMAR 0mm
+	FTER Default
+	PCODE mms to 0 dpls  Inches to 1 dpls  Fractions to 32 ths  Angles to 1 dpls
+	NTEXT unset
+	TXCOLO 10
+	NLSTYL Solid
+	NLCOLO 1
+	FSTYLE Off
+	FCOLOUR 1
+	LLSTYL Solid
+	LLCOLO 1
+	LFSTYL Solid
+	LFCOLO 1
+	DLSTYL Solid
+	DLCOLO 10
+	PLSTYL Solid
+	PLCOLO 10
+	MSTYLE Off
+	MCOLOUR 1
+	CHSTYL Off
+	CHCOLO 1
+	POSFOR ENU
+	
+	NEW LAYER /$!viewName/USER_Labs
+	--DIR $!viewDirection
+	PURP LABA
+	UCOD mm  Distance   mm  Bore Nominal
+	FONT 11
+	LTER Off
+	JUST Left
+	ALIGN Base
+	DTER Arrows
+	TSIZ 2.5mm
+	CHOS 6mm
+	ASUB 0degree
+	PJUS Towards
+	OSHT 2mm
+	PLCL 0mm
+	DOFF 25mm
+	DMSP 0mm
+	CHEI 2.5mm
+	LLEA true
+	LFRA true
+	LSHA Straight
+	GBOX 0mm
+	CSPA 0
+	LSPA 0
+	LLCL 0mm
+	XYPS 0mm 0mm
+	BPOF 0mm 0mm
+	BLNK true
+	BMAR 0mm
+	FTER Default
+	PCODE mms to 0 dpls  Inches to 1 dpls  Fractions to 32 ths  Angles to 1 dpls
+	NTEXT unset
+	TXCOLO 2
+	NLSTYL Solid
+	NLCOLO 1
+	FSTYLE Off
+	FCOLOUR 1
+	LLSTYL Solid
+	LLCOLO 2
+	LFSTYL Solid
+	LFCOLO 2
+	DLSTYL Solid
+	DLCOLO 1
+	PLSTYL Solid
+	PLCOLO 1
+	MSTYLE Off
+	MCOLOUR 1
+	CHSTYL Off
+	CHCOLO 1
+	POSFOR ENU
+	
+	NEW LAYER /$!viewName/USER_Notes
+	--DIR $!viewDirection
+	PURP NOTA
+	UCOD mm  Distance   mm  Bore Nominal
+	FONT 1
+	LTER Off
+	JUST Left
+	ALIGN Bbody
+	DTER Arrows
+	TSIZ 2.5mm
+	CHOS 6mm
+	ASUB 0degree
+	PJUS Towards
+	OSHT 2mm
+	PLCL 0mm
+	DOFF 25mm
+	DMSP 0mm
+	CHEI 2.5mm
+	LLEA true
+	LFRA true
+	LSHA Straight
+	GBOX 1mm
+	CSPA 0
+	LSPA 0
+	LLCL 0mm
+	XYPS 25mm 25mm
+	BPOF 0mm 0mm
+	BLNK true
+	BMAR 0mm
+	FTER Default
+	PCODE mms to 0 dpls  Inches to 1 dpls  Fractions to 32 ths  Angles to 1 dpls
+	NTEXT unset
+	TXCOLO 1
+	NLSTYL Solid
+	NLCOLO 1
+	FSTYLE Off
+	FCOLOUR 1
+	LLSTYL Solid
+	LLCOLO 1
+	LFSTYL Solid
+	LFCOLO 1
+	DLSTYL Solid
+	DLCOLO 1
+	PLSTYL Solid
+	PLCOLO 1
+	MSTYLE Off
+	MCOLOUR 1
+	CHSTYL Off
+	CHCOLO 1
+	POSFOR ENU
+	NEW VNOTE
+	XYPS $!viewCenterX  $!viewCenterY 
+	JUST Left
+	ALIGN Bbody
+	FONT 1
+	BLNK true
+	BMAR 0mm
+	CHEI 2.5mm
+	CSPA 0
+	LSPA 0
+	TXCOLO 1
+	NLSTYL Solid
+	NLCOLO 1
+	FSTYLE Off
+	FCOLOUR 1
+	MSTYLE Off
+	MCOLOUR 1
+	
+	NEW LAYER /$!viewName/USER_Tags
+	--DIR $!viewDirection
+	PURP TAGA
+	UCOD mm  Distance   mm  Bore Nominal
+	FONT 1
+	LTER Off
+	JUST Left
+	ALIGN Bbody
+	DTER Arrows
+	TSIZ 2.5mm
+	CHOS 6mm
+	ASUB 0degree
+	PJUS Towards
+	OSHT 2mm
+	PLCL 0mm
+	DOFF 25mm
+	DMSP 0mm
+	CHEI 4mm
+	LLEA true
+	LFRA true
+	LSHA Straight
+	GBOX 1mm
+	CSPA 0
+	LSPA 0
+	LLCL 0mm
+	XYPS 25mm 25mm
+	BPOF 0mm 0mm
+	BLNK true
+	BMAR 0mm
+	FTER Default
+	PCODE mms to 0 dpls  Inches to 1 dpls  Fractions to 32 ths  Angles to 1 dpls
+	NTEXT unset
+	TXCOLO 4
+	NLSTYL Solid
+	NLCOLO 1
+	FSTYLE Off
+	FCOLOUR 1
+	LLSTYL Solid
+	LLCOLO 4
+	LFSTYL Solid
+	LFCOLO 4
+	DLSTYL Solid
+	DLCOLO 1
+	PLSTYL Solid
+	PLCOLO 1
+	MSTYLE Off
+	MCOLOUR 1
+	CHSTYL Off
+	CHCOLO 1
+	POSFOR ENU
+endmethod
+-------------------------------------------------------------------
+--PDMSUI里的文件无法直接调用，需要使用宏文件调用
+define method .sheetupdate()
+	--更新
+	SHEE
+	$m %PMLLIB%\LayoutTool\mac\updatedesign.mac
+	handle any
+	endhandle
+endmethod
+-------------------------------------------------------------------

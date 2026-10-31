@@ -1,0 +1,122 @@
+﻿define object TextWriter
+	--【23.162 新增】全插件唯一的"写文字"实现。
+	--   背景：同一套三级兜底（① 对象接口 ② |...| 定界命令 ③ 转义后命令形式）
+	--   原来在 6 个文件里各抄了一份，共 232 行，且已经出现版本漂移
+	--   （SetSlabText 两份 37 行、SetTextSafe/SetCellText 四份 34 行）。
+	--   现在逻辑只在这里一份，各文件**保留自己原来的方法名做薄壳**
+	--   （DimensionGenerator/LabelGenerator.SetSlabText、GridGenerator.SetCellText、
+	--     NoteGenerator/NozzleOrientationGenerator.SetTextSafe），
+	--   所以 20+ 个调用点一行都不用改 —— 符合"只加不改"。
+	--   三种行为：
+	--     .WriteSlab() → ATEXT / ATEX    （#ATEXT 那套，SLABEL 与尺寸链文字）
+	--     .WriteNote() → BTEX  / BTEXT   （#ATEX 那套，注记 / 管口 / 表格单元格）
+	--     .SafeText()  → unset → 空串   （拼接文字前先过一遍）
+	--   写入目标沿用 `!!ce`，与改造前完全一致（零行为变化）。
+	--   为什么对象接口能避开引号问题：`!!ce.atext = !text` 的右值是变量，
+	--   文本不经过命令行词法分析，管名里的英寸符号 `1/2'` 不会再截断字符串
+	--   —— 这正是 23.157 `(47,50) CP: Meaningless symbol(s)` 的根因。
+	member .kind is string
+endobject
+--------------------------------------------------------------------------------------
+--取安全字符串：变量可能是 unset（老版命令形式下 unset 会展开成空，
+--但"拼接"会让它报错），拼接前一律过一遍。
+define method .SafeText(!s is string) is string
+	if(!s.unset())then
+		return ''
+	endif
+	return !s
+endmethod
+--------------------------------------------------------------------------------------
+--写 SLABEL / 尺寸链文字（#ATEXT / #ATEX）。
+--返回 true = 至少一种方式写成功；false = 只能用转义后的文字（已尽量写进去）。
+--【注意·条件写法】判断"成功"一律用独立的 if 逐条判，不写 `!a or !b` —— 本工程
+--  23.143 记过：PML 组合条件在同样的数据上会走不同分支，能用朴素分支就别组合。
+define method .WriteSlab(!text is string) is boolean
+	-- ① 对象接口：两套文本 codeword（#ATEXT / #ATEX）都写一次，任一成功即可
+	!okA = true
+	!!ce.atext = !text
+	handle any
+		!okA = false
+	endhandle
+	!okB = true
+	!!ce.atex = !text
+	handle any
+		!okB = false
+	endhandle
+	if(!okA)then
+		return true
+	endif
+	if(!okB)then
+		return true
+	endif
+	-- ② 兜底 1：命令形式改用 |...| 定界 —— 单引号在 |...| 里是普通字符，
+	--    管名里的 1/2' 不会再截断命令行（AVEVA 自己也这么写：ATEXT |Start#/line|）。
+	--    ATEXT / ATEX 两条命令**各自单独兜底**：
+	--    原来把两条写在一起、只给第二条挂 handle，于是"ATEXT 成功、ATEX 失败"
+	--    会被误判成失败，接着用转义版把刚写好的文字**覆盖**掉。
+	!barA = true
+	ATEXT |$!text|
+	handle any
+		!barA = false
+	endhandle
+	!barB = true
+	ATEX |$!text|
+	handle any
+		!barB = false
+	endhandle
+	if(!barA)then
+		return true
+	endif
+	if(!barB)then
+		return true
+	endif
+	-- ③ 兜底 2：连 |...| 都写不进去 —— 按本工程已验证的转义惯例
+	--    （把 ' 换成 "、把 | 换成 /）后再用命令形式，并打印替换后的文本便于核对。
+	!safe = !text.replace(|'|,|"|)
+	!safe = !safe.replace('|','/')
+	$p LayoutTool text: attribute write failed - quotes replaced for ATEXT/ATEX:
+	$p $!safe
+	ATEXT '$!safe'
+	ATEX '$!safe'
+	return false
+endmethod
+--------------------------------------------------------------------------------------
+--写注记文字（#ATEX 那套：BTEX / BTEXT）。
+--   与 .WriteSlab 同构，只是 codeword 换成 BTEX/BTEXT（依据 AVEVA 自己的写法：
+--   draft\objects\pinetappingdrwg.pmlobj 一带用 `!!ce.btex = !viewTitle`）。
+define method .WriteNote(!text is string) is boolean
+	-- ① 对象接口：BTEX / BTEXT 两个属性都写一次，任一成功即可
+	!okA = true
+	!!ce.btex = !text
+	handle any
+		!okA = false
+	endhandle
+	!okB = true
+	!!ce.btext = !text
+	handle any
+		!okB = false
+	endhandle
+	if(!okA)then
+		return true
+	endif
+	if(!okB)then
+		return true
+	endif
+	-- ② 兜底 1：|...| 定界（与改造前一致，仍只发 BTEX 一条命令）
+	!barA = true
+	BTEX |$!text|
+	handle any
+		!barA = false
+	endhandle
+	if(!barA)then
+		return true
+	endif
+	-- ③ 兜底 2：转义后再写
+	!safe = !text.replace(|'|,|"|)
+	!safe = !safe.replace('|','/')
+	$p LayoutTool text: attribute write failed - quotes replaced for BTEX:
+	$p $!safe
+	BTEX '$!safe'
+	return false
+endmethod
+--------------------------------------------------------------------------------------

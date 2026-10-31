@@ -1,0 +1,15 @@
+﻿define object ViewAnnotation
+	member .dbElement is dbref
+	member .xPos is real
+	member .yPos is real
+	member .xOff is real
+	member .yOff is real
+	--【23.164 新增】标注文字的外框（mm），用于"两个标注会不会压在一起"的真实判据。
+	--   原来代价函数把标注当**点**、只用 11mm 半径判重叠，而设备名（CHEI 5mm、十几个字符）
+	--   实际有 30~50mm 宽 —— 点判据根本判不出来，所以才会出现两个标注重叠。
+	--   由 LabelGenerator.LabelExtent() 在收集标注时按文字长度估算；读不到文字时为 0，
+	--   此时退回旧的圆形半径判据（与改造前等价）。
+	member .xLen is real
+	member .yLen is real
+endobject
+--------------------------------------------------------------------------------------

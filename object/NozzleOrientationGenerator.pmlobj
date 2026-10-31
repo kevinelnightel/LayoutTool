@@ -1,0 +1,856 @@
+﻿-- ============================================================================
+-- NozzleOrientationGenerator.pmlobj
+-- 管口方位图（设备管口方位标注）
+--
+-- 【本次移植说明】新版 LayoutTool 原先只有"管口表"（第 1 批的 NozzleGrid 按钮），
+--   没有"管口方位图"本身——即：在设备视图上把每个管口的名称标出来，
+--   并在立式设备的方位图上画出每个管口的方位角度线。
+--   本对象补齐这两块（管口表继续用 NozzleGrid，不重复实现）。
+--
+-- 【移植来源】老版 E:\DeepSeek\WorkSpace\PipeLayout\pipelayout.pmlfrm
+--   mnozzapply        3573-3579   按设备型式分派（Vertical / Horizontal）
+--   mhnozzapply       3581-3669   卧式设备：管口名注记 + 左右/上下四向管口尺寸链 + 管口表
+--   mvnozzapply       3671-3765   立式设备：管口名注记 + 方位角扇形线 + 管口表
+--   neweanglenote     3767-3801   画一条方位角线 + 在线端写角度值
+--   newequinozznote   3803-3848   按象限把管口名标在管口投影点附近
+--
+-- 【本批范围与取舍】
+--   已做：分派、设备解析、管口名注记（四象限）、方位角扇形线、管口表数据
+--         （表数据复用第 1 批的 GridDataGet.GetNozzleRows，出表复用 GridGenerator）
+--   未做（唯一遗留项，见日志 14.5）：卧式设备的"四向管口尺寸链"（老版 newnozzdim 2501-2581）
+--         ——那是一块独立的尺寸标注功能，本对象不含。
+--
+-- 【刻意保留（保证外观与既有图纸一致）】
+--   · 管口名标签：GLABEL + `DDNM NOZZLE <管口>`，象限偏移 ±20mm；
+--     四个象限的 JUST/ALIGN 组合（右上 Left/Bbody、右下 Left/Tbody、
+--     左下 RIGHT/Tbody、左上 RIGHT/Bbody）；字高 20mm、TSIZ 2mm、GBOX 1mm、
+--     LFRA ON、LTER OFF、LLEA FALSE、LSHA Straight、文本色 6、线色 10；
+--   · 方位角线：长度 = max(xsize,ysize)/2 + 20；Draft 角度 = 90 - 方位角；
+--     线型 8004、线色 2；角度文字在**线端**（读 !!ce.ptfa[2].xypos）、字高 20mm、
+--     方位角 > 90° 时 JUST right 否则 Left、文本色 10；
+--   · 方位图锚点 VNOTE 放在"设备中心投影到图面"的位置：
+--     view.xypos + (设备中心 - 视图范围中点) × 视图比例；
+--   · 图层名 `<视图名>-equinozznote`，锚点 VNOTE 名 `<视图名>-anglenote`。
+--
+-- 【刻意修正（相对老版，详见 PORTING_LOG.md 第 14 节）】
+--   1. **设备解析更稳**：老版 `!adde = !view.idlname.member; !equi = !adde[1].idname.string()`
+--      —— 只取 DrawList 的**第一个** ADDE，且假定它就是设备。本对象遍历 ADDE，
+--      能直接取到 EQUI 就用，否则按作用域查 `coll all equi` 取第一个。
+--   2. **不再重复查询**：老版 mvnozzapply 在 3700 与 3736 对同一设备查了两遍
+--      `coll all nozz`，并用同名变量覆盖；本对象只查一次。
+--   3. **方位角计算统一**：老版在 mvnozzapply 里内联算角（3740-3751）；
+--      本对象抽成 `NozzleAngle()`，便于与表格数据共用。
+--      ⚠ 目前 GridDataGet.GetNozzleRows 仍内联了同一算法（见日志 14.5 待归并）。
+--      【23.73 已解决】上面这条已处理：GetNozzleRows 改为调用本对象的
+--      `EquisFromView()` / `NozzlesOfEqui()` / `NozzleAngle()`，表与标注同源同算法。
+--   4. **角度文字格式**：老版 `BTEX '$!angle°'` 直接拼实数，可能出现 `45.000000°`；
+--      本对象用 `.string('D0')` 取整（与老版方位角图习惯一致），**度符号 `°` 与老版一致保留**。
+--      【23.76 说明】度符号曾在 23.68 被临时去掉：当时本文件是"UTF-8 无 BOM"，
+--      AVEVA 按 ANSI 代码页读，`°` 的 UTF-8 字节 `C2 B0` 被拆成 `Â`(字母) + `°`(符号)，
+--      字母 `Â` 被吸进变量名 → 报 `Variable ANGTEXTÂ not defined`。
+--      23.75 补齐 BOM 后文件按 UTF-8 解析，`°` 是符号、正常终止变量名，故恢复。
+--   5. 增加参数校验与状态码（老版无任何校验与反馈）。
+-- ============================================================================
+define object NozzleOrientationGenerator
+	-- 目标 VIEW（必须）
+	member	.view			is	dbref
+	-- 设备；不设置时由视图 DrawList 推断
+	member	.equi			is	dbref
+	--【本次修改·按你的要求】本次要生成哪一类设备的管口方位图：
+	--   'VERTICAL'   = 立式设备（Drawing Setting 的 Layout = NozzleLayout(Vertical)）；
+	--   'HORIZONTAL' = 卧式设备（Layout = NozzleLayout(Horizontal)）；
+	--   unset        = 不筛选，视图里的设备全做（NozzleNote 按钮走这条，行为不变）。
+	--   方位判定见 DetectOrientation()（读设备自身属性 EQUI.ORIE）。
+	member	.orientation	is	string
+	-- 字高(mm)，默认 20
+	member	.textHeight		is	real
+	-- 方位线超出视图的余量(mm)，默认 20
+	member	.fanExtra		is	real
+	-- 管口名标签的象限偏移(mm)，默认 20
+	member	.labelOffset	is	real
+	-- 图层后缀，默认 '-equinozznote'
+	member	.layerSuffix	is	string
+	-- 输出：本次画出的方位线数量
+	member	.angleCount		is	real
+	--【本次新增·按你的要求】输出：本次补上的尺寸点个数（卧式四向尺寸链用；立式恒为 0）
+	--   卧式没有角度线，若沿用 .angleCount 报数，命令行会出现 "angle lines = " 这种空值。
+	member	.dimPointCount	is	real
+	--【本次新增】输出统计：本次实际处理的设备台数 / 其中方位判定不出来（UNKNOWN）的台数
+	member	.equiCount			is	real
+	member	.orieUnknownCount	is	real
+endobject
+------------------------------------------------------------------------------
+-- 由视图的 DrawList 推断设备（老版 3593-3594 / 3682-3683 的稳健版）
+-- 返回 dbref；推断不出来时返回 unset
+-- 【注意】不声明返回类型：失败时要返回 unset
+-- 由视图的 DrawList 推断设备（老版 3593-3594 / 3682-3683 的稳健版）
+-- 【报错修复】(2,766) This function does not return a result
+--   原来这里写"不声明返回类型、失败时 return !result"，但 !result 在本方法里**从未被赋值** ——
+--   在 PML 里那等于"没有返回值"，调用方一赋值（`!this.equi = !this.EquiFromView()`）就报 (2,766)。
+--   现在改成：**返回 boolean 表示"找到没有"，找到时由本方法直接设置成员 !this.equi**；
+--   签名只用内建类型（boolean / dbref），符合本插件其它方法的写法。
+define method .EquiFromView() is boolean
+	!view = !this.view
+	if(!view.unset())then
+		return false
+	endif
+	!members = !view.idlname.member
+	if(!members.unset())then
+		return false
+	endif
+	!foundOk = false
+	do !i indices !members
+		if(!members[$!i].type ne 'ADDE')then
+			skip
+		endif
+		!scope = !members[$!i].idname
+		if(!scope.unset())then
+			skip
+		endif
+		!ok = true
+		!scopeName = !scope.string()
+		!scopeType = !scope.type
+		handle any
+			!ok = false
+		endhandle
+		if(!ok)then
+			-- 直接就是设备（.idname 已经是 dbref，不能再调 .dbref()）
+			if(!scopeType eq 'EQUI')then
+				!found = !scope
+				!foundOk = true
+			else
+				-- 否则在作用域里找第一台设备（coll 的结果才需要 .dbref()）
+				!ok2 = true
+				var !equiList coll all equi for $!scopeName
+				handle any
+					!ok2 = false
+				endhandle
+				-- 分两层判断，避免 coll 失败后取 .size()（不依赖 and 的短路）
+				if(!ok2)then
+					if(!equiList.size() gt 0)then
+						!found = !equiList[1].dbref()
+						!foundOk = true
+					endif
+				endif
+			endif
+		endif
+		if(!foundOk)then
+			!this.equi = !found
+			return true
+		endif
+	enddo
+	return false
+endmethod
+------------------------------------------------------------------------------
+-- 判断设备型式：'VERTICAL' / 'HORIZONTAL' / 'UNKNOWN'
+	--   规则：设备的 ORIE（朝向，**取 .string() 后**）为 U/D（或 UP/DOWN）视为立式，其余(N/S/E/W)视为卧式。
+	--   【注意】按你的要求，Generate() 目前**不调用本方法**（一律按立式处理）；
+	--   本方法保留备用：以后要区分立式/卧式时，按 Generate() 注释里的两行换回即可。
+--【本次新增·按你的要求】从视图的 AddList 收集**全部**设备（即你要求的 coll all equi）：
+--   AddList 每条 ADDE 的 scope：本身是 EQUI 就直接收，否则在该 scope 上 coll all equi。
+--   【关键】coll 的 scope 直接用 dbref 变量 —— 老插件就是这么写的
+--   （pipelayout.pmlfrm:3612 / 3701 / 3737 `var !nozzs coll all nozz for $!equi`），
+--   **不做名字字符串代入**，避免 (47,15) 那类问题。
+--   返回 dbref 数组（已去重）；取不到返回空数组，调用方据此报 'NOEQUI'。
+define method .EquisFromView() is array
+	!arr = object array()
+	!view = !this.view
+	if(!view.unset())then
+		return !arr
+	endif
+	!members = !view.idlname.member
+	if(!members.unset())then
+		return !arr
+	endif
+	do !i indices !members
+		if(!members[$!i].type ne 'ADDE')then
+			skip
+		endif
+		!scope = !members[$!i].idname
+		if(!scope.unset())then
+			skip
+		endif
+		!ok = true
+		!scopeType = !scope.type
+		handle any
+			!ok = false
+		endhandle
+		if(!ok)then
+			if(!scopeType eq 'EQUI')then
+				!arr.append(!scope)
+			else
+				!ok2 = true
+				var !equiList coll all equi for $!scope
+				handle any
+					!ok2 = false
+				endhandle
+				if(!ok2)then
+					do !j indices !equiList
+						!arr.append(!equiList[$!j].dbref())
+					enddo
+				endif
+			endif
+		endif
+	enddo
+	!arr.unique()
+	return !arr
+endmethod
+------------------------------------------------------------------------------
+--【本次新增·按你的要求】取一台设备下的管口：
+--   ① 先按你说的 `coll all nozz for <设备>`（scope 直接用 dbref 变量，与老插件一致）；
+--   ② 取不到再在设备子树里逐层找 NOZZ（ZONE/EQUI 往下走，最多 3 层），兼容管口不直属设备的情况。
+--   返回 dbref 数组（已去重）。
+define method .NozzlesOfEqui(!equi is dbref) is array
+	!arr = object array()
+	!ok = true
+	var !nozzList coll all nozz for $!equi
+handle any
+	!ok = false
+endhandle
+	if(!ok)then
+		do !i indices !nozzList
+			!arr.append(!nozzList[$!i].dbref())
+		enddo
+	endif
+	-- ② 兜底：设备子树里逐层找 NOZZ
+	if(!arr.size() lt 1)then
+		!frontier = object array()
+		!frontier.append(!equi)
+		do !lvl from 1 to 3
+			!next = object array()
+			do !i indices !frontier
+				!mems = !frontier[$!i].members
+				if(!mems.unset().not())then
+					do !j indices !mems
+						!t = !mems[$!j].type
+						if(!t eq 'NOZZ')then
+							!arr.append(!mems[$!j])
+						elseif(!t eq 'ZONE' or !t eq 'EQUI')then
+							!next.append(!mems[$!j])
+						endif
+					enddo
+				endif
+			enddo
+			!frontier = !next
+			if(!frontier.size() lt 1)then
+				break
+			endif
+		enddo
+	endif
+	!arr.unique()
+	return !arr
+endmethod
+------------------------------------------------------------------------------
+define method .DetectOrientation() is string
+	!result = 'UNKNOWN'
+	!ok = true
+	--【本次修正·按你的反馈】23.77 用 EQUI.ORIE 属性判定，结果**立式/卧式搞反了** ——
+	--   说明你那边 ORIE 的填法与当时假设的 U/D = 立式 不一致（那个假设本来就没在你模型上验证过）。
+	--   现在改用**几何**判定，与属性怎么填无关：立式/卧式的本义就是高度方向 Z 是不是最长边。
+	--     包围盒 Z 向尺寸 >= X、Y 向尺寸  →  立式 VERTICAL
+	--     否则（X 或 Y 更长）              →  卧式 HORIZONTAL
+	--   包围盒用 object volume(!equi)（与 NoteGenerator.Generatevnote 里同一个用法）。
+	--   取不到包围盒 → 返回 UNKNOWN，调用方**不排除**该设备（宁可多画，不漏画）。
+	!vol = object volume(!this.equi)
+	handle any
+		!ok = false
+	endhandle
+	if(!ok.not())then
+		return !result
+	endif
+	!xLen = abs(!vol.to.east - !vol.from.east)
+	!yLen = abs(!vol.to.north - !vol.from.north)
+	!zLen = abs(!vol.to.up - !vol.from.up)
+	if(!zLen ge !xLen and !zLen ge !yLen)then
+		!result = 'VERTICAL'
+	else
+		!result = 'HORIZONTAL'
+	endif
+	return !result
+endmethod
+------------------------------------------------------------------------------
+-- 主入口：生成管口方位图注记
+--   'OK'        成功
+--   'NOVIEW'    view 未设置或不是 VIEW
+--   'NOEQUI'    无法确定设备
+	--   'NOORIE'    （**暂不返回**：按你的要求现在一律按立式处理，不区分卧式/立式）
+--   'NONOZZ'    设备没有管口
+define method .Generate() is string
+	!view = !this.view
+	if(!view.unset())then
+		return 'NOVIEW'
+	endif
+	if(!view.type ne 'VIEW')then
+		return 'NOVIEW'
+	endif
+	--【本次修正·按你的反馈】管口方位图必须**基于 VIEW 层级**生成：
+	--   下面 NEW LAYER / NEW GLABEL / NEW TEXTPRIMITIVE 的父级都是当前元素 CE，
+	--   而从 Generate（建图）流程进来时 CE 还停在刚建好的 SHEET 上 ——
+	--   那会把图层与管口注记挂到 SHEET 下面（并报错），所以这里显式把 CE 切回 VIEW。
+	--   老版 mvnozzapply / mhnozzapply 开头就是 view + !view = !!ce，同一个意思；
+	--   NozzleNote 按钮那条路 CE 本来就是 VIEW，切一次也无副作用。
+	!!ce = !view
+	--【本次新增·按你的要求】管口方位图不要 View 的边框：把该 VIEW 的 LFRAME 关掉。
+	--   SheetGenerator.GenerateView() 建 VIEW 时统一写的是 `LFRA true`，这里只对本图种改 false；
+	--   其它图种（管道/设备/仪表布置图）保持原样。CE 上面刚切到 !view，所以这条命令作用在它身上。
+	LFRA false
+	!suffix = !this.layerSuffix
+	if(!suffix.unset())then
+		!suffix = '-equinozznote'
+	endif
+	!layerName = !view.name + !suffix
+	!labelGenerator = object LabelGenerator()
+	!labelGenerator.LayerGenerate(!layerName)
+	-- 设备清单：调用方已给 .equi 就用那一台，否则从视图 AddList 收集全部设备
+	!equiArr = object array()
+	if(!this.equi.unset().not())then
+		!equiArr.append(!this.equi)
+	else
+		!equiArr = !this.EquisFromView()
+	endif
+	if(!equiArr.size() lt 1)then
+		return 'NOEQUI'
+	endif
+	--【本次新增·按你的要求】本模式要求的设备方位（'VERTICAL' / 'HORIZONTAL'）：
+	--   unset = 不筛选，视图里的设备全做（NozzleNote 按钮走这条，行为与以前完全一致）；
+	--   设置了 = 只做该方位的设备。判定读设备自身的方位属性 EQUI.ORIE
+	--   （U/D = 立式，E/W/N/S = 卧式），见 DetectOrientation()。
+	--   判定不出来（UNKNOWN）时**不排除**该设备：宁可多画，也不能因为读不到属性就整张图空着。
+	!wantOrie = !this.orientation
+	!nozzCount = 0
+	!equiUsed = 0
+	!orieUnknown = 0
+	--【报错修复】(2,754) Argument 1 to + is unset
+	--   23.82 加的这两行初始化当时没插进去：锚点写成了 2 个制表符缩进、实际是 1 个，
+	--   锚点没命中但脚本没报错就静默跳过了，于是 .dimPointCount 一直是未设置，
+	--   AddDimPoint 里那句自增就报 unset。这里补上；以后这类插入一律加必须命中的断言。
+	!this.angleCount = 0
+	!this.dimPointCount = 0
+	do !k indices !equiArr
+		!this.equi = !equiArr[$!k]
+		if(!wantOrie.unset().not())then
+			!orie = !this.DetectOrientation()
+			if(!orie eq 'UNKNOWN')then
+				!orieUnknown = !orieUnknown + 1
+			elseif(!orie ne !wantOrie)then
+				skip
+			endif
+		endif
+		-- 每台设备上 coll all nozz（取不到再退回子树搜索）
+		!nozzArr = !this.NozzlesOfEqui(!this.equi)
+		if(!nozzArr.size() lt 1)then
+			skip
+		endif
+		!equiUsed = !equiUsed + 1
+		-- 1) 管口名注记
+		!this.DrawNozzleLabels(!nozzArr)
+		-- 2) 主体部分按模式分流：
+		--   卧式（Layout = NozzleLayout(Horizontal)）= 四向尺寸链（老版 mhnozzapply 3623-3664）；
+		--   立式、以及 NozzleNote 按钮那种不筛选的情况 = 方位角扇形线（老版 mvnozzapply）。
+		if(!wantOrie eq 'HORIZONTAL')then
+			!this.DrawNozzleDims(!nozzArr)
+		else
+			!this.DrawAngleFan(!nozzArr)
+		endif
+		!nozzCount = !nozzCount + !nozzArr.size()
+	enddo
+	-- 输出统计，供界面提示（筛掉了多少台 / 有几台判不出方位）
+	!this.equiCount = !equiUsed
+	!this.orieUnknownCount = !orieUnknown
+	if(!nozzCount lt 1)then
+		if(!equiUsed lt 1 and !wantOrie.unset().not())then
+			-- 视图里有设备，但没有一台属于本模式要求的方位
+			return 'NOMATCH'
+		endif
+		return 'NONOZZ'
+	endif
+	return 'OK'
+endmethod
+
+------------------------------------------------------------------------------
+-- 逐个管口画管口名注记（对应老版对 newequinozznote 的调用循环）
+-- !nozzs：管口 dbref 数组
+define method .DrawNozzleLabels(!nozzs is array)
+	do !i indices !nozzs
+		!this.DrawNozzleLabel(!nozzs[$!i])
+	enddo
+endmethod
+------------------------------------------------------------------------------
+-- 单个管口名注记（对应老版 newequinozznote 3803-3848）
+-- 按管口投影点相对视图中心的象限，决定标签的偏移与对齐方向
+define method .DrawNozzleLabel(!nozz is dbref)
+	--【本次修正】同 DrawAngleLine：本方法 NEW GLABEL 后当前元素停在标签上，
+	--   逐管口调用时必须先还原到锚点，否则第二个起的标签会挂到上一个标签下面。
+	!back = !!ce
+	!view	= !this.view
+	!cx		= !view.xypos.east
+	!cy		= !view.xypos.north
+	!off	= !this.labelOffset
+	if(!off.unset())then
+		!off = 20
+	endif
+	!chei	= !this.textHeight
+	if(!chei.unset())then
+		!chei = 20
+	endif
+	!equiName = !this.equi.name
+	-- 管口名（去掉"设备名-"前缀）
+	!note = !nozz.name
+	!shortName = !note.after(!equiName + '-')
+	!useShort = false
+	if(!shortName.unset())then
+		!useShort = false
+	elseif(!shortName.length() gt 0)then
+		!useShort = true
+	endif
+	if(!useShort)then
+		!note = !shortName
+	endif
+	NEW GLABEL
+	DDNM NOZZLE $!nozz
+	!ddnmx = !!ce.ddnmxy[1]
+	!ddnmy = !!ce.ddnmxy[2]
+	-- 负偏移先算成变量再拼进命令，避免 `-$!off` 这种带负号的替换写法
+	!offNeg = 0 - !off
+	-- 四象限：与老版 3811-3827 完全一致
+	if(!ddnmx ge !cx and !ddnmy ge !cy)then
+		XYPS $!off $!off
+		JUST Left
+		ALIGN Bbody
+	elseif(!ddnmx ge !cx and !ddnmy lt !cy)then
+		XYPS $!off $!offNeg
+		JUST Left
+		ALIGN Tbody
+	elseif(!ddnmx lt !cx and !ddnmy lt !cy)then
+		XYPS $!offNeg $!offNeg
+		JUST RIGHT
+		ALIGN Tbody
+	elseif(!ddnmx lt !cx and !ddnmy ge !cy)then
+		XYPS $!offNeg $!off
+		JUST RIGHT
+		ALIGN Bbody
+	endif
+	LFRA ON
+	GBOX 1mm
+	CHEI $!chei mm
+	CSPA 0
+	LSPA 0
+	LLCL 0mm
+	TSIZ 2mm
+	LTER OFF
+	--【本次修改·按你的要求】管口名标签打开引线（原来是从老插件抄来的 LLEA FALSE = 关），
+	--   引线样式/颜色/间隙用下面已有的 LLSTYL / LLCOLO / LLCL / BPOF。
+	LLEA TRUE
+	BPOF 0mm 0mm
+	LSHA Straight
+	FONT 1
+	BLNK true
+	BMAR 0mm
+	--【23.158 修改·按你的要求】改用对象接口写入（管口/设备名里带引号时命令行会被截断）
+	!this.SetTextSafe(!note)
+	--【本次修改·按你的要求】引线线型改成 8003（与本工程尺寸投影线同一线型）
+	LLSTYL 8003
+	LFSTYL Solid
+	TXCOLO 6
+	LLCOLO 10
+	LFCOLO 10
+	$!back
+endmethod
+------------------------------------------------------------------------------
+-- 立式设备的方位角扇形线（对应老版 mvnozzapply 3704-3759）
+--   锚点 VNOTE 放在"设备中心投影到图面"的位置；每个管口画一条方位线并标角度
+define method .DrawAngleFan(!nozzs is array)
+	!view	= !this.view
+	!equi	= !this.equi
+	!xsize	= !view.size[1]
+	!ysize	= !view.size[2]
+	!vscale	= !view.vscale
+	-- 设备中心（模型坐标）
+	!centerPos = !equi.pos.wrt(world)
+	-- 视图范围中点（模型坐标）
+	--【本次修正·同 23.57】vvol 是 PDMS 求解的派生量，截面不兼容时（APS 那张图）会抛 (64,443)，
+	--   故先试 vvol，取不到就改用本插件自己的体积口径 LimitDbelementGet.GetVolume()。
+	!midOk = true
+	!vvol = !view.vvol
+handle any
+	!midOk = false
+endhandle
+	if(!midOk.not())then
+		!limitGet = object LimitDbelementGet()
+		!limitGet.view = !view
+		!vol = !limitGet.GetVolume()
+		!midEast  = (!vol.from.east + !vol.to.east) / 2
+		!midNorth = (!vol.from.north + !vol.to.north) / 2
+	else
+		!midEast  = (!vvol[1] + !vvol[4]) / 2
+		!midNorth = (!vvol[2] + !vvol[5]) / 2
+	endif
+	-- 设备中心可能不是图纸中心，需要偏移（老版 3705-3707）
+	!xoff = !view.xypos.east  + (!centerPos.east  - !midEast)  * !vscale
+	!yoff = !view.xypos.north + (!centerPos.north - !midNorth) * !vscale
+	-- 方位图锚点 VNOTE（老版 3708-3734，并把它命名为 <视图名>-anglenote）
+	NEW VNOTE
+	XYPS X $!xoff Y $!yoff
+	JUST Left
+	ALIGN Bbody
+	FONT 1
+	BLNK true
+	BMAR 0mm
+	CHEI 2.5mm
+	CSPA 0
+	LSPA 0
+	TXCOLO 2
+	NLSTYL Solid
+	NLCOLO 2
+	FSTYLE Off
+	FCOLOUR 2
+	MSTYLE Off
+	MCOLOUR 2
+	!noteName = !view.name + '-anglenote'
+	name $!noteName
+	--【本次新增·按你的要求】先画**设备本身的东西南北中心线**（方位角 0 / 90 / 180 / 270），并各自标注角度。
+	--   复用 DrawAngleLine：它从当前锚点（= 设备中心）沿给定方位角画一条线、并在线端标角度，
+	--   所以四次调用正好构成贯穿设备中心的十字中心线；线型/颜色/文字风格与管口方位线一致。
+	--   （要区分"中心线"和"管口方位线"的外观，或改成带 N/E/S/W 字母，改这里两行即可。）
+	--【本次新增·按你的要求】方位角**同一个角度只标注一次**：
+	--   先查重（把已画过的角度记在 !drawn 里），重复就跳过；
+	--   选"先查重"而不是"画完再删"：不必事后去 Draft 里找元素、也就不会删错/删不干净。
+	--   四条中心线（0/90/180/270）先登记，管口的方位角若与它们或彼此重复，就不重复标注。
+	!drawn = object array()
+	!drawn.append(0)
+	!drawn.append(90)
+	!drawn.append(180)
+	!drawn.append(270)
+	!this.DrawAngleLine(0)
+	!this.DrawAngleLine(90)
+	!this.DrawAngleLine(180)
+	!this.DrawAngleLine(270)
+	-- 逐管口画方位线
+	!count = 0
+	do !i indices !nozzs
+		!angle = !this.NozzleAngle(!nozzs[$!i])
+		-- 返回值：0..360 = 方位角；-1 = 该管口跳过（PML 不能"返回空值"，见 23.63 的 (2,766) 教训）
+		if(!angle ge 0)then
+			--【本次新增】先查这个方位角有没有画过；画过就不重复标注
+			!dup = false
+			do !k indices !drawn
+				if(!drawn[$!k] eq !angle)then
+					!dup = true
+				endif
+			enddo
+			if(!dup.not())then
+				!drawn.append(!angle)
+				!count = !count + 1
+				!this.DrawAngleLine(!angle)
+			endif
+		endif
+	enddo
+	!this.angleCount = !count
+endmethod
+------------------------------------------------------------------------------
+-- 计算一个管口的方位角（自正北顺时针，整数度）
+--   对应老版 mvnozzapply 3738-3751：
+--   1) 以设备位置为中心、管口位置（投影到同一水平面）为端点作直线；
+--   2) 该直线与正北方向的夹角取整；
+--   3) 管口在设备中心以西时 = 360 - 角度；
+--   4) 管口与设备中心重合（线长为 0，Direction() 抛 2,785）→ 返回 unset（老版跳过该管口）。
+-- 【注意】不声明返回类型：失败时要返回 unset
+define method .NozzleAngle(!nozz is dbref) is real
+	--【报错修复】(2,869) Error in conversion to world co-ordinates
+	--   原因：原来用 `object position()` 手工拼点 —— 它建出来的是"**当前坐标系**"里的位置，
+	--   而填进去的却是 wrt(world) 的**世界坐标**，坐标系不一致，Direction() 要转换时报 (2,869)。
+	--   改法：照老插件的做法（pipelayout.pmlfrm:3739-3742）——
+	--     ① 管口位置取 `wrt(world)`（世界坐标，本身带 world 参照）；
+	--     ② 设备中心也只改 .up 对齐管口标高；
+	--     ③ 两点直接构成 line，Direction() 无需转换。
+	--【本次修正】失败/跳过时返回 -1（PML **不能"返回空值"** —— `return !none` 那种写法会让
+	--   调用方赋值时报 (2,766)，见 23.63 的教训），调用方用 `!angle ge 0` 判断是否画线。
+	!equi = !this.equi
+	!skip = false
+	!angle = 0
+	!centerPos = !equi.pos.wrt(world)
+	!nozzPos = !nozz.pos.wrt(world)
+	-- 两个点都在世界坐标系里；只把设备中心的标高对齐到管口，使连线落在同一水平面内
+	!centerPos.up = !nozzPos.up
+	!line = object line(!centerPos,!nozzPos)
+	!dir = !line.Direction()
+	-- 危险语句写在 handle 前面；这里只保护"算方向"这一段，出错就跳过该管口：
+	--   2,785 = 管口与设备中心重合（线长为 0，老版就是跳过）
+	--   2,869 = 坐标转换失败（例如管口没有有效位置）
+handle any
+	!skip = true
+endhandle
+	if(!skip)then
+		return -1
+	endif
+	!ndir = object Direction('N')
+	!angle = !ndir.angle(!dir).nint()
+	if(!nozzPos.east lt !centerPos.east)then
+		!angle = 360 - !angle
+	endif
+	return !angle
+endmethod
+------------------------------------------------------------------------------
+-- 画一条方位角线并在线端标角度（对应老版 neweanglenote 3767-3801）
+define method .DrawAngleLine(!angle is real)
+	--【本次修正】本方法会 NEW STRAIGHT + NEW TEXTPRIMITIVE，结束时当前元素会停在那个文字上；
+	--   若调用方接着画下一条线，就会把它挂到文字下面（偏移随之错位）。
+	--   所以这里自己"进来记住、出去还原"：!back = 进入时的元素，方法末尾 $!back。
+	!back = !!ce
+	!view	= !this.view
+	!xsize	= !view.size[1]
+	!ysize	= !view.size[2]
+	!extra	= !this.fanExtra
+	if(!extra.unset())then
+		!extra = 20
+	endif
+	!chei	= !this.textHeight
+	if(!chei.unset())then
+		!chei = 20
+	endif
+	-- 线长：取视图长边的一半再加余量（老版 3770-3774）
+	if(!xsize gt !ysize)then
+		!dist = !xsize * 0.5 + !extra
+	else
+		!dist = !ysize * 0.5 + !extra
+	endif
+	-- 方位角 → Draft 角度（老版 3776）
+	!lineangle = 90 - !angle
+	NEW STRAIGHT
+	Fpt Offset X 0mm Y 0mm
+	Adegrees $!lineangle
+	Length $!dist
+	NLSTYL 8004
+	NLCOLO 2
+	-- 取线端坐标：老版 3785-3786 读当前线元素的 ptfa[2].xypos
+	!textposx = !!ce.ptfa[2].xypos.east
+	!textposy = !!ce.ptfa[2].xypos.north
+	!angText = !angle.string('D0')
+	NEW TEXTPRIMITIVE
+	Origin X $!textposx Y $!textposy
+	FONT 1
+	CHEI $!chei mm
+	CSPA 0
+	LSPA 0
+	if(!angle gt 90)then
+		JUST right
+	else
+		JUST Left
+	endif
+	ALIGN Bbody
+	--【23.76 按你的要求】恢复老版的度符号：老版 `pipelayout.pmlfrm:3800` 就是 `BTEX '$!angle°'`。
+	--   本文件 23.75 起是 UTF-8 with BOM，`°` 会被正确解析（符号，终止变量名），不会污染变量名。
+	--【23.158 修改·同上】度符号照旧拼在文字里（老版 pipelayout.pmlfrm:3800 就是 `$!angle°`）
+	!this.SetTextSafe(!this.SafeText(!angText) + '°')
+	TXCOLO 10
+	$!back
+endmethod
+------------------------------------------------------------------------------
+-----------------------------------------------------------------------------
+-- 卧式设备的"四向尺寸"标注（对应老版 mhnozzapply 3623-3664 + newnozzdim 2502-2582）
+--   把管口按视图范围的中线分成 左右（按 east）/ 上下（按 north）四组，
+--   每组在视图角上建一条 LDIMENSION 尺寸链（老版叫"四向标注"）。
+--   立式那条走的是 DrawAngleFan（方位角扇形线），卧式走这里，与老版两条入口一致。
+define method .DrawNozzleDims(!nozzs is array)
+	!view = !this.view
+	if(!nozzs.size() lt 1)then
+		return
+	endif
+	-- 视图范围：同一个 vvol / GetVolume 双口径（理由见 DrawAngleFan 的说明）
+	!midOk = true
+	!vvol = !view.vvol
+handle any
+	!midOk = false
+endhandle
+	if(!midOk.not())then
+		!limitGet = object LimitDbelementGet()
+		!limitGet.view = !view
+		!vol = !limitGet.GetVolume()
+		!eastMid  = (!vol.from.east + !vol.to.east) / 2
+		!northMid = (!vol.from.north + !vol.to.north) / 2
+	else
+		!eastMid  = (!vvol[1] + !vvol[4]) / 2
+		!northMid = (!vvol[2] + !vvol[5]) / 2
+	endif
+	-- 按两条中线分组（老版 3629-3635 按 east 分左右 / 3650-3656 按 north 分上下）
+	!left  = object array()
+	!right = object array()
+	!up    = object array()
+	!down  = object array()
+	do !i indices !nozzs
+		if(!nozzs[$!i].east lt !eastMid)then
+			!left.append(!nozzs[$!i])
+		else
+			!right.append(!nozzs[$!i])
+		endif
+		if(!nozzs[$!i].north lt !northMid)then
+			!down.append(!nozzs[$!i])
+		else
+			!up.append(!nozzs[$!i])
+		endif
+	enddo
+	-- 四个放置点（老版 3637-3664：右侧与上方共用 +,+ 角，左侧与下方共用 −,− 角）
+	!cornerPX = !view.xypos.east  + !view.size[1] / 2 + 20
+	!cornerPY = !view.xypos.north + !view.size[2] / 2 + 20
+	!cornerNX = !view.xypos.east  - !view.size[1] / 2 - 20
+	!cornerNY = !view.xypos.north - !view.size[2] / 2 - 20
+	-- 每次新建数组：PML 数组是引用语义，复用同一个数组会让四条链都指向同一组坐标
+	!size = object array()
+	!size[1] = !cornerPX
+	!size[2] = !cornerPY
+	!this.DrawDimChain(!size,'N',!right)
+	!size = object array()
+	!size[1] = !cornerNX
+	!size[2] = !cornerNY
+	!this.DrawDimChain(!size,'N',!left)
+	!size = object array()
+	!size[1] = !cornerPX
+	!size[2] = !cornerPY
+	!this.DrawDimChain(!size,'E',!up)
+	!size = object array()
+	!size[1] = !cornerNX
+	!size[2] = !cornerNY
+	!this.DrawDimChain(!size,'E',!down)
+endmethod
+-----------------------------------------------------------------------------
+-- 一条管口尺寸链（对应老版 newnozzdim 2502-2582）
+--   !size      尺寸链放置点（图纸坐标 X / Y，老版是视图角 ±20）
+--   !direction 'N' = 标注东西方向的位置，'E' = 标注南北方向的位置
+--   !limitcomp 该组管口 dbref 数组
+--   【与老版的唯一差别（有意为之）】老版没还原当前元素，链建完 CE 会停在最后一个 DPPT 上，
+--   下一条链的 NEW LDIMENSION 就会挂到 DPPT 下面去；这里存/还原 CE，保证四条链都建在图层下。
+define method .DrawDimChain(!size is array,!direction is string,!limitcomp is array)
+	if(!limitcomp.size() lt 1)then
+		return
+	endif
+	!back = !!ce
+	NEW LDIMENSION
+	DIR $!direction
+	DPOS X $!size[1] Y $!size[2]
+	DMSP 0mm
+	TSIZ 7
+	DTER Arrows
+	PJUS Towards
+	DFON 11
+	PFON 11
+	PLSP 0
+	PLCL 0mm
+	OSHT 7
+	DTCH 7
+	PTCH 7
+	BLNK true
+	BMAR 0mm
+	FTER Off
+	DLSTYL 8002
+	PLSTYL 8002
+	DLCOLO 10
+	PLCOLO 10
+	DTCOLO 10
+	PTCOLO 10
+	-- 排序：'E' 按 east 升序、'N' 按 north 升序（老版 2527-2566 的冒泡排序，原样照抄）
+	!list = !this.SortNozzles(!limitcomp,!direction)
+	-- 逐个补尺寸点（老版 2540-2553 / 2567-2580 原样保留）：
+	--   !diaflag = true 表示"这个管口在标注方向上与上一个不重合" → 补一个 DPPT，
+	--   相邻管口坐标相同（成对/成排）时只留一个点，避免出现零长度尺寸段。
+	do !p indices !list
+		!diaflag = true
+		if(!p gt 1)then
+			!o = !p - 1
+			if(!direction eq 'E')then
+				if(!list[$!p].east eq !list[$!o].east)then
+					!diaflag = false
+				endif
+			else
+				if(!list[$!p].north eq !list[$!o].north)then
+					!diaflag = false
+				endif
+			endif
+		endif
+		if(!diaflag)then
+			!this.AddDimPoint(!list[$!p])
+			-- 尺寸点相对所标管口再偏 20mm（老版 2551 / 2578 的 `ptof 20 0`）
+			ptof 20 0
+		endif
+	enddo
+	$!back
+endmethod
+-----------------------------------------------------------------------------
+-- 按 east 或 north 升序排序（老版 newnozzdim 里的冒泡排序）
+--   返回**新数组**，不动调用方传进来的分组数组
+define method .SortNozzles(!list is array,!direction is string) is array
+	!arr = object array()
+	do !i indices !list
+		!arr.append(!list[$!i])
+	enddo
+	!range1 = !arr.size()
+	do !m from 1 to !range1
+		!range2 = !range1 - !m
+		do !n from 1 to !range2
+			!x = !n + 1
+			if(!direction eq 'E')then
+				if(!arr[$!n].east gt !arr[$!x].east)then
+					!temp = !arr[$!x]
+					!arr[$!x] = !arr[$!n]
+					!arr[$!n] = !temp
+				endif
+			else
+				if(!arr[$!n].north gt !arr[$!x].north)then
+					!temp = !arr[$!x]
+					!arr[$!x] = !arr[$!n]
+					!arr[$!n] = !temp
+				endif
+			endif
+		enddo
+	enddo
+	return !arr
+endmethod
+-----------------------------------------------------------------------------
+-- 尺寸链上的一个尺寸点（对应老版 newdppt 3935-3949）
+--   Pltxt '#DEF' = 显示默认的实测值（Draft 的文本代码）
+define method .AddDimPoint(!nozz is dbref)
+	NEW DPPT
+	DDNM NOZZLE $!nozz
+	PLSP Default
+	PLCL Default
+	OSHT Default
+	PJUS Default
+	DLSTYL 8001
+	DLCOLO Default
+	PLSTYL Default
+	PLCOLO Default
+	DTCOLO Default
+	PTCOLO Default
+	Pltxt '#DEF'
+	--【本次新增】尺寸点计数（给界面报数用）
+	--【报错修复】(2,754) 防御式自增：成员未设置也能安全计数，不依赖调用方先清零
+	!cnt = !this.dimPointCount
+	if(!cnt.unset())then
+		!cnt = 0
+	endif
+	!this.dimPointCount = !cnt + 1
+endmethod
+--------------------------------------------------------------------------------------
+--【23.158 新增·按你的要求】文字安全写入：把文字写进"当前图元"（!!ce，本文件里是 SLABEL /
+--   TEXTPRIMITIVE），**不经过命令行词法分析** —— 文本里带单引号也不会把 PML 字符串截断。
+--   背景：`BTEX '$!note'` 这种写法是"先把变量文本代入这一行，再按 PML 语法解析"，
+--   名字里出现 `'`（英寸口径，如 1/2'SSH900-…）就会报
+--   `(47,50) CP: Meaningless symbol(s) in command line`（详见 PORTING_LOG.md 23.157）。
+--   依据：AVEVA 自己写文字都用对象接口 ——
+--     design\objects\pipespooldwg.pmlobj:968  `!!ce.btext = !tableData[!j][!i]`、
+--     draft\objects\pipetappingdrwg.pmlobj:496 `!!ce.btex = !viewTitle`。
+--   三级兜底：① 对象接口 ② `|...|` 定界命令 ③ 转义（' → "、| → /）后命令形式并打印。
+--   与 DimensionGenerator.SetSlabText / LabelGenerator.SetSlabText / GridGenerator.SetCellText 同一套。
+define method .SetTextSafe(!mess is string)
+	--【23.162 薄壳】实现已收敛到 TextWriter.WriteNote（全插件唯一一份三级兜底）。
+	--   保留本方法名：调用点一处都不用改。
+	!writer = object TextWriter()
+	!writer.WriteNote(!mess)
+	endmethod
+--------------------------------------------------------------------------------------
+--【23.158 新增】取安全字符串：变量可能是 unset（老版命令形式下 unset 会展开成空），
+--   拼接前一律过一遍，避免 `unset + '字符串'` 报错。写法与本工程 GridGenerator.EscapeText 一致。
+define method .SafeText(!s is string) is string
+	--【23.162 薄壳】实现已收敛到 TextWriter.SafeText。
+	!writer = object TextWriter()
+	return !writer.SafeText(!s)
+	endmethod

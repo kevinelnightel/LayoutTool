@@ -1,0 +1,222 @@
+﻿define object XmlGenerator
+	
+endobject
+--------------------------------------------------------------------------------------
+define method .GenerateXmlFile(!drawlist is array,!removelist is array,!viewConfigList is array,!filePath is string)
+	!fileMessage = object array()
+	--保存Drawlist
+	!message = '<DrawList>'
+	!fileMessage.append(!message)
+	if(!drawlist.size() ne 0)then
+		do !ptrDarwlist indices !drawlist
+			!message = '	<>' + !drawlist[$!ptrDarwlist]
+			!fileMessage.append(!message)
+		enddo
+	endif
+	!message = '<EndDrawList>'
+	!fileMessage.append(!message)
+	--结束保存Drawlist
+	
+	--保存Removelist
+	!message = '<RemoveList>'
+	!fileMessage.append(!message)
+	if(!removelist.size() ne 0)then
+		do !ptrRemovelist indices !removelist
+			!message = '	<>' + !removelist[$!ptrRemovelist]
+			!fileMessage.append(!message)
+		enddo
+	endif
+	!message = '<EndRemoveList>'
+	!fileMessage.append(!message)
+	--结束保存RemoveList
+	
+	--保存ViewConfigList
+	!message = '<ViewConfigList>'
+	!fileMessage.append(!message)
+	if(!viewConfigList.size() ne 0)then
+		do !ptrviewConfigList indices !viewConfigList
+			!viewName			=		'<ViewName>'			+	!viewConfigList[$!ptrviewConfigList].viewName
+			!viewLimitFrom		=		'<ViewLimitFrom>'		+	!viewConfigList[$!ptrviewConfigList].viewLimitFrom.string()
+			!viewLimitTo		=		'<ViewLimitTo>'			+	!viewConfigList[$!ptrviewConfigList].viewLimitTo.string()
+			!viewPositionX		=		'<viewPositionX>'		+	!viewConfigList[$!ptrviewConfigList].viewPosition[1].string()
+			!viewPositionY		=		'<viewPositionY>'		+	!viewConfigList[$!ptrviewConfigList].viewPosition[2].string()
+			!viewDirection		=		'<viewDirection>'		+	!viewConfigList[$!ptrviewConfigList].viewDirection
+			!viewScale			=		'<viewScale>'			+	!viewConfigList[$!ptrviewConfigList].viewScale.string()
+			!viewType			=		'<viewType>'			+	!viewConfigList[$!ptrviewConfigList].viewType
+			!viewGrid			=		'<viewGird>'			+	!viewConfigList[$!ptrviewConfigList].viewGrid
+	--【本次新增·按你的要求】把该 ViewConfig 自己的 DrawList / RemoveList 也写进这一行，
+	--   元素之间用 | 分隔（viewName 里不会出现 | ），与既有"一行一个配置"的格式一致。
+	!dlText = ''
+	!dl = !viewConfigList[$!ptrviewConfigList].drawlist
+	if(!dl.unset().not())then
+		do !ptrDl indices !dl
+			if(!dlText eq '')then
+				!dlText = !dl[$!ptrDl]
+			else
+				!dlText = !dlText + '|' + !dl[$!ptrDl]
+			endif
+		enddo
+	endif
+	!rlText = ''
+	!rl = !viewConfigList[$!ptrviewConfigList].removelist
+	if(!rl.unset().not())then
+		do !ptrRl indices !rl
+			if(!rlText eq '')then
+				!rlText = !rl[$!ptrRl]
+			else
+				!rlText = !rlText + '|' + !rl[$!ptrRl]
+			endif
+		enddo
+	endif
+	!viewDrawList	= '<ViewDrawList>' + !dlText
+	!viewRemoveList	= '<ViewRemoveList>' + !rlText
+	--【本次新增·按你的要求】该视图的 Layout 选项（生成类型）也写进同一行末尾。
+	--   没存过 → 只写标签不写值，读取端按"未设置"处理（不会覆盖当前下拉）。
+	!lkText = ''
+	!lk = !viewConfigList[$!ptrviewConfigList].layoutKind
+	if(!lk.unset().not())then
+		!lkText = !lk
+	endif
+	!viewLayoutKind	= '<ViewLayoutKind>' + !lkText
+	--【本次新增·按你的要求】相对标高(mm) 也写进同一行末尾（没存过就只写标签不写值）。
+	!relText = ''
+	!relValue = !viewConfigList[$!ptrviewConfigList].relativeElev
+	if(!relValue.unset().not())then
+		!relText = !relValue.string()
+	endif
+	!viewRelativeEL	= '<ViewRelativeEL>' + !relText
+
+			!message			=		'	' + !viewName + !viewLimitFrom + !viewLimitTo + !viewPositionX + !viewPositionY + !viewDirection + !viewScale + !viewType + !viewGrid + !viewDrawList + !viewRemoveList + !viewLayoutKind + !viewRelativeEL
+			!fileMessage.append(!message)
+		enddo
+	endif
+	
+	!message = '<EndViewConfigList>'
+	!fileMessage.append(!message)
+	--结束保存ViewConfigList
+
+	!file = object file(!filePath)
+	!file.Writefile('overwrite',!fileMessage)
+endmethod
+--------------------------------------------------------------------------------------
+define method .LoadXmlFile(!filePath is string) is array
+	!returnArray		= object array()
+	!drawlistArray		= object array()
+	!removelistArray	= object array()
+	!viewconfigArray	= object array()
+	--【本次修正·按你的反馈】!viewPosition / !viewConfig 原来在这里**只 new 一次**、循环里反复复用，
+	--   于是某行没有的字段会继承上一行的值（见循环体开头的说明）。现已改为每行新建，这两行不再需要。
+
+	
+	!file = object file(!filePath)
+	if(!file.EXISTS().not())then
+		return
+	endif
+	!fileMessage = !file.ReadFile()
+	do !ptrFileMessage indices !fileMessage
+		if(!fileMessage[$!ptrFileMessage] eq '<DrawList>')then
+			!drawlistStartLineNo = !ptrFileMessage + 1
+		elseif(!fileMessage[$!ptrFileMessage] eq '<EndDrawList>')then
+			!drawlistEndLineNo = !ptrFileMessage - 1
+			
+		elseif(!fileMessage[$!ptrFileMessage] eq '<RemoveList>')then
+			!removelistStartLineNo = !ptrFileMessage + 1
+		elseif(!fileMessage[$!ptrFileMessage] eq '<EndRemoveList>')then
+			!removelistEndLineNo = !ptrFileMessage - 1
+			
+		elseif(!fileMessage[$!ptrFileMessage] eq '<ViewConfigList>')then
+			!viewConfigListStartLineNo = !ptrFileMessage + 1
+		elseif(!fileMessage[$!ptrFileMessage] eq '<EndViewConfigList>')then
+			!viewConfigListEndLineNo = !ptrFileMessage - 1
+		endif
+	enddo
+	
+	if(!drawlistStartLineNo le !drawlistEndLineNo)then
+		do !i from !drawlistStartLineNo to !drawlistEndLineNo
+			!message = !fileMessage[$!i].after('<>')
+			!drawlistArray.append(!message)
+		enddo
+	endif
+	
+	if(!removelistStartLineNo le !removelistEndLineNo)then
+		do !i from !removelistStartLineNo to !removelistEndLineNo
+			!message = !fileMessage[$!i].after('<>')
+			!removelistArray.append(!message)
+		enddo
+	endif
+	
+	if(!viewConfigListStartLineNo le !viewConfigListEndLineNo)then
+		do !i from !viewConfigListStartLineNo to !viewConfigListEndLineNo
+			--【本次修正·按你的反馈】每行都**新建** ViewConfig 与 viewPosition：
+			--   原来这两个对象在循环外只 new 一次、循环里反复复用，导致
+			--   1) 本行没有的字段会**继承上一行的值** —— 你看到的「没有 removelist 的视图
+			--      在载入 XML 后被塞了一个多余的 removelist」就是这个原因：
+			--      行里 <ViewRemoveList> 为空时下面那句 if 不成立、不赋值，成员就留着上一行的清单。
+			--      （drawlist / layoutKind 同理。）
+			--   2) viewPosition 是数组，PML 数组是引用语义 —— 复用一个数组会让所有视图
+			--      都指向同一个数组（值都变成最后一行的）。
+			!viewConfig = object ViewConfig()
+			!viewPosition = object array()
+			!lkLine = !fileMessage[$!i]
+			!lkText = ''
+			--【本次新增·按你的要求】先把行末的 <ViewLayoutKind>（该视图的 Layout 生成类型）剥出来。
+			--   老文件没有这个标签 → !lkText 为空 → layoutKind 保持"未设置"，
+			--   点选 viewlist 时不会去动当前下拉（向后兼容）。
+			--   !lkLine 是"去掉该标签后的整行"，后面的 viewGrid / DrawList 解析都用它，
+			--   否则行末那个标签会被当成 viewGrid 或 RemoveList 的一部分。
+			--【本次新增·按你的要求】把行末的 <ViewLayoutKind> 与 <ViewRelativeEL> 依次剥出来。
+			--   老文件没有这两个标签 → 对应成员保持未设置，点选 viewlist 时不会去动当前控件（向后兼容）。
+			--   !lkLine 是去掉这些标签之后的整行，后面的 viewGrid / DrawList 解析都用它，
+			--   否则行末标签会被当成 viewGrid 或 RemoveList 的一部分。
+			!relText = ''
+			if(!lkLine.matchwild('*<ViewLayoutKind>*'))then
+				!lkText = !lkLine.after('<ViewLayoutKind>')
+				!lkLine = !lkLine.before('<ViewLayoutKind>')
+			endif
+			-- 相对标高排在 layoutKind 之后，所以先看 !lkText 里有没有它，再决定 layoutKind 取到哪儿
+			if(!lkText.matchwild('*<ViewRelativeEL>*'))then
+				!relText = !lkText.after('<ViewRelativeEL>')
+				!lkText = !lkText.before('<ViewRelativeEL>')
+			endif
+			if(!lkText.length() gt 0)then
+				!viewConfig.layoutKind = !lkText
+			endif
+			if(!relText.length() gt 0)then
+				!viewConfig.relativeElev = !relText.real()
+			endif
+			!viewConfig.viewName		=	!fileMessage[$!i].after('<ViewName>').before('<ViewLimitFrom>')
+			!viewConfig.viewLimitFrom	=	!fileMessage[$!i].after('<ViewLimitFrom>').before('<ViewLimitTo>').position()
+			!viewConfig.viewLimitTo		=	!fileMessage[$!i].after('<ViewLimitTo>').before('<viewPositionX>').position()
+			
+			!viewPosition[1]			=	!fileMessage[$!i].after('<viewPositionX>').before('<viewPositionY>')
+			!viewPosition[2]			=	!fileMessage[$!i].after('<viewPositionY>').before('<viewDirection>')
+			!viewConfig.viewPosition	=	!viewPosition
+			!viewConfig.viewDirection	=	!fileMessage[$!i].after('<viewDirection>').before('<viewScale>')
+			!viewConfig.viewScale		=	!fileMessage[$!i].after('<viewScale>').before('<viewType>').REAL()
+			!viewConfig.viewType		=	!fileMessage[$!i].after('<viewType>').before('<viewGird>')
+			--【本次新增·按你的要求】该行末若带 DrawList / RemoveList 字段就解析出来（元素用 | 分隔）；
+			--   老文件没有这两个标签，走 else 分支 —— 行为与以前完全一致（向后兼容）。
+			if(!fileMessage[$!i].matchwild('*<ViewDrawList>*'))then
+				!viewConfig.viewGrid	=	!lkLine.after('<viewGird>').before('<ViewDrawList>')
+				!dlText = !fileMessage[$!i].after('<ViewDrawList>').before('<ViewRemoveList>')
+				!rlText = !lkLine.after('<ViewRemoveList>')
+				if(!dlText.length() gt 0)then
+					!viewConfig.drawlist = !dlText.split('|')
+				endif
+				if(!rlText.length() gt 0)then
+					!viewConfig.removelist = !rlText.split('|')
+				endif
+			else
+				!viewConfig.viewGrid	=	!lkLine.after('<viewGird>')
+			endif
+			!viewconfigArray.append(!viewConfig)
+		enddo
+	endif
+
+	!returnArray[1] = !drawlistArray
+	!returnArray[2] = !removelistArray
+	!returnArray[3] = !viewconfigArray
+	
+	return !returnArray
+endmethod
+--------------------------------------------------------------------------------------

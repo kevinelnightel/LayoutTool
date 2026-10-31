@@ -1,0 +1,1376 @@
+﻿define object DrawingGenerator
+	--用来在draft里生成图面
+	member	.drawingName			is	string
+	member	.drawingSize			is	string
+	member	.drawlist				is	array
+	member	.removelist				is	array
+	--【本次新增·按你的要求】图纸种类（Drawing Setting 的 Layout 选项）：
+	--   'EquiLayout' = 设备布置图：颜色规则里只有设备有颜色，其余灰 1 号。
+	member	.layoutKind		is	string
+endobject
+---------------------------------------------------------------------------
+--生成
+define method .Generate()
+	!drawingName		=	!this.drawingName
+	!drawingSize		=	!this.drawingSize
+	!drawlist			=	!this.drawlist
+	!removelist			=	!this.removelist
+	
+	!this.GenerateDrwg(!drawingName,!drawingSize)				$*生成DRWG
+	handle(41,12) 
+		--【本次修正·按你的要求】同名 DRWG 已存在（(41,12)）时的处理：
+		--   问"是否删除重建" ——
+		--     答 YES → 把旧图删掉，然后重新建（保持原来的行为）；
+		--     答 NO  → **直接 return，什么都不删**。
+		--   ⚠ 原来这里写的是：
+		--        if(!result eq 'YES')then ...删除+重建...
+		--        else  delete DRWG   ← 答"否"反而把图删了！
+		--        return
+		--     分支是反的，属于会毁数据的既有缺陷（批量出图那段的注释里也记着这个毛病：
+		--     "老版那个分支回答'否'也会删图"）。本次只删掉 else 里的 `delete DRWG`，
+		--     其余保持原样，不引入新的删除路径。
+		--   （另外 MethodGenerateView 里已经先做过一次"是否存在 → 问询 → 删除"的判断，
+		--     所以正常从 Generate 按钮走时这里不会再次弹窗；本段是给直接调用
+		--     DrawingGenerator 的场合兜底。）
+		!result = !!alert.question('$!drawingName already used. Delete it?')
+		if(!result eq 'YES')then
+			!back = !!ce
+			/$!drawingName
+			delete DRWG
+			$!back
+			!this.GenerateDrwg(!drawingName,!drawingSize)
+		else
+			$p Existing drawing kept - nothing was created or deleted:
+			$p $!drawingName
+			return
+		endif
+	endhandle
+	!this.GenerateLiby(!drawingName,!drawingSize)				$*生成LIBY
+	!this.GenerateSTYL(!drawingName)							$*生成RPLB-STYL
+	!this.GenerateRRST(!drawingName)							$*生成RPLB-RRST
+	!this.GenerateHSTYL(!drawingName)							$*生成RPLB-HSTYL
+	!this.GenerateHRUL(!drawingName)							$*生成RPLB-HSTYL
+	!this.GenerateTRLB(!drawingName)							$*生成TRLB
+	!this.GenerateDLLB(!drawingName,!drawlist,!removelist)		$*生成DLLB
+	!this.GenerateDimensionLabels(!drawingName,!drawingSize)	$*生成LALB-标准的四周引线样式
+	!this.GenerateBbodyLabelLib(!drawingName,!drawingSize)		$*【本次新增】DIMLABELS 的不换行版（-Bbody）
+	!this.GenerateGridLabelLib(!drawingName,!drawingSize)		$*生成LALB-轴网四周引线样式
+	!this.GenerateInstlabelLib(!drawingName,!drawingSize)		$*生成LALB-图面的仪表标注样式
+	!this.GenerateEquiLabelLib(!drawingName,!drawingSize)		$*【本次新增】生成LALB-图面设备名标注样式
+	!this.GenerateSuppLabelLib(!drawingName,!drawingSize)		$*生成LALB-图面支架标注样式
+	!this.GeneratePipelineLabelLib(!drawingName,!drawingSize)	$*生成LALB-图面管道标注样式
+	!this.GenerateNozzLib(!drawingName,!drawingSize)			$*生成LALB-图面管口标注样式
+	!this.GenerateSylbRule(!drawingName,!drawingSize)			$*生成SYLB
+endmethod
+---------------------------------------------------------------------------
+--生成drawing
+define method .GenerateDrwg(!drawingName is string,!drawingSize is string)
+	--新建一个DRWG
+	NEW DRWG /$!drawingName
+	SIZE $!drawingSize
+	FONT 1
+	UCOD mm  Distance   mm  Bore Nominal
+	DTER Arrows
+	LTER Off
+	PCODE mms to 0 dpls  Inches to 1 dpls  Fractions to 32 ths  Angles to 1 dpls
+	NTEXT '---'
+	TXCOLO 1
+	NLSTYL Solid
+	NLCOLO 1
+	LLSTYL Solid
+	LLCOLO 1
+	LFSTYL Solid
+	LFCOLO 1
+	DLSTYL Solid
+	DLCOLO 1
+	PLSTYL Solid
+	PLCOLO 1
+	FSTYLE Off
+	FCOLOUR 1
+	POSFOR ENU
+endmethod
+---------------------------------------------------------------------------
+--新建规则目录
+define method .GenerateLiby(!drawingName is string,!drawingSize is string)
+	NEW LIBY /$!drawingName/LIBY
+	SIZE $!drawingSize
+	UCOD mm  Distance   mm  Bore Nominal
+	FONT 1
+	DTER Arrows
+	LTER Off
+	PCODE mms to 0 dpls  Inches to 1 dpls  Fractions to 32 ths  Angles to 1 dpls
+	NTEXT '---'
+	TXCOLO 1
+	NLSTYL Solid
+	NLCOLO 1
+	LLSTYL Solid
+	LLCOLO 1
+	LFSTYL Solid
+	LFCOLO 1
+	DLSTYL Solid
+	DLCOLO 1
+	PLSTYL Solid
+	PLCOLO 1
+	FSTYLE Off
+	FCOLOUR 1
+	POSFOR ENU
+endmethod
+---------------------------------------------------------------------------
+--新建风格规则
+define method .GenerateSTYL(!drawingName is string)
+	NEW RPLB /$!drawingName/STYL
+	--【本次新增·按你的要求】颜色规则按图纸种类走：
+	--   EquiLayout（设备布置图）= **只有设备(EQUI)保留颜色**，
+	--     管道/结构/暖通/轴网/仪表一律灰 1 号（下面这组变量的值改成 1）；
+	--   其它图种取值不变，行为与以前完全一致。
+	!equiMode = false
+	!instMode = false
+	if(!this.layoutKind eq 'EquiLayout')then
+		!equiMode = true
+	elseif(!this.layoutKind eq 'InstLayout')then
+		!instMode = true
+	endif
+	!cPipeSingle = 4
+	--【23.152 修改·按你的要求】PIPE 填充色改成 **3**。
+	--   历史：老版 4 → 23.151 按你的要求改 5 → 23.152 按你的要求改 **3**（最终值 3）。
+	--   PIPE-SINGLE 仍是 4（它的 RRULE 判据在 GenerateRRST 里被 $() 注掉了，当前不出图）
+	!cPipe = 3
+	--【本次修复】PIPE 图层的**中心线**色用单独变量：老版 PIPE 的 FFCOLO=4、CLCOLO=2（红），
+	--   我 23.96 参数化时两者共用了 !cPipe，中心线被画成了 4 号色。
+	!cPipeCl = 2
+	!cSteel = 13
+	!cAsl = 8
+	!cHvac = 8
+	--【本次修复】同上：老版 HVAC 的 FFCOLO=8、CLCOLO=2（红）
+	!cHvacCl = 2
+	!cGrid = 2
+	!cInst = 2
+	--【23.152 修改·按你的要求】EQUI 填充色改回 **5**。
+	--   历史：老版 5 → 23.151 曾按你的要求改 3 → 23.152 按你的要求改回 **5**（与老版一致）。
+	--   ⚠ 这个基础值同时决定**设备布置图（EquiLayout）**里 EQUI 的颜色（那边不覆盖 EQUI，只把管道等变灰），
+	--     所以 23.151 提过的"设备布置图跟着变"的问题，随着这里回到 5 已经不存在了。
+	--   （EQUI 两个颜色当初参数化的原因：InstLayout 只有仪表保留颜色 → 设备也必须能变灰。）
+	!cEquiFf = 5
+	!cEquiCl = 2
+	if(!equiMode)then
+		!cPipeSingle = 1
+		!cPipe = 1
+		!cPipeCl = 1
+		!cSteel = 1
+		!cAsl = 1
+		!cHvac = 1
+		!cHvacCl = 1
+		!cGrid = 1
+		!cInst = 1
+	endif
+	--【本次新增·按你的要求】InstLayout（仪表点位图）：**只有仪表保留颜色**，
+	--   管道/结构/暖通/轴网/设备一律灰 1 号；!cInst 保持 2 号不变。
+	if(!instMode)then
+		!cPipeSingle = 1
+		!cPipe = 1
+		!cPipeCl = 1
+		!cSteel = 1
+		!cAsl = 1
+		!cHvac = 1
+		!cHvacCl = 1
+		!cGrid = 1
+		!cEquiFf = 1
+		!cEquiCl = 1
+	endif
+	--管道规则
+	$(
+	NEW STYLE /$!drawingName/STYL/PIPE-SINGLE
+	TUFG On
+	PLFG Off
+	FFSTYL Off
+	BFSTYL Off
+	CLSTYL Solid
+	CLCOLO $!cPipeSingle
+	OBSTYL Off
+	PLNSTY Off
+	MLNSTY Off
+	PINSST Off
+	DLEV 6
+	$)
+	NEW STYLE /$!drawingName/STYL/PIPE
+	TUFG On
+	PLFG Off
+	FFSTYL Solid
+	FFCOLO $!cPipe
+	BFSTYL Off
+	CLSTYL Chained
+	CLCOLO $!cPipeCl
+	OBSTYL Off
+	PLNSTY Off
+	MLNSTY Off
+	PINSST Off
+	DLEV 6
+	--设备规则
+	NEW STYLE /$!drawingName/STYL/EQUI
+	TUFG On
+	PLFG Off
+	FFSTYL Solid
+	FFCOLO $!cEquiFf
+	BFSTYL Off
+	CLSTYL Chained
+	CLCOLO $!cEquiCl
+	OBSTYL Off
+	PLNSTY Off
+	MLNSTY Off
+	PINSST Off
+	DLEV 6
+	--结构规则
+	NEW STYLE /$!drawingName/STYL/STEEL
+	CLFG Off
+	PRFG On
+	PLFG Off
+	FFSTYL Solid
+	FFCOLO $!cSteel
+	BFSTYL Off
+	CLSTYL Chained
+	CLCOLO $!cSteel
+	OBSTYL Off
+	PLNSTY Off
+	MLNSTY Chained
+	MLNCOL $!cSteel
+	PINSST Off
+	DLEV 6
+	--结构规则
+	NEW STYLE /$!drawingName/STYL/ASL
+	TUFG On
+	PLFG Off
+	FFSTYL Solid
+	FFCOLO $!cAsl
+	BFSTYL Off
+	CLSTYL Chained
+	CLCOLO $!cAsl
+	OBSTYL Off
+	PLNSTY Off
+	MLNSTY Chained
+	MLnColour $!cAsl
+	PINSST Off
+	DLEV 6
+	--暖通规则
+	NEW STYLE /$!drawingName/STYL/HVAC
+	TUFG On
+	PLFG Off
+	FFSTYL Solid
+	FFCOLO $!cHvac
+	BFSTYL Off
+	CLSTYL Chained
+	CLCOLO $!cHvacCl
+	OBSTYL Off
+	PLNSTY Off
+	MLNSTY Off
+	PINSST Off
+	DLEV 6
+	--轴网规则
+	NEW STYLE /$!drawingName/STYL/GRID
+	CLFG Off
+	PRFG On
+	PLFG Off
+	FFSTYL Chained
+	FFCOLO $!cGrid
+	BFSTYL Off
+	CLSTYL Chained
+	CLCOLO $!cGrid
+	OBSTYL Off
+	PLNSTY Off
+	MLNSTY Chained
+	MLNCOL $!cGrid
+	PINSST Off
+	DLEV 6
+	--仪表规则
+	NEW STYLE /$!drawingName/STYL/INST
+	TUFG On
+	PLFG Off
+	FFSTYL Solid
+	FFCOLO $!cInst
+	BFSTYL Off
+	CLSTYL Chained
+	CLCOLO $!cInst
+	OBSTYL Off
+	PLNSTY Off
+	MLNSTY Off
+	PINSST Off
+	DLEV 6
+endmethod
+-------------------------------------------------------------------
+--新建颜色规则
+define method .GenerateRRST(!drawingName is string)
+	--这个是有先后顺序的，在前的优先
+	NEW RPLB /$!drawingName/REPR
+	NEW RRST /$!drawingName/REPR/ALL
+	--轴网规则
+	NEW RRULE /$!drawingName/REPR/ALL/GRID
+	STYF STYLE /$!drawingName/STYL/GRID
+	CRIT  ALL SCTN WITH ( MATCH(GTYPE,'XGRD') gt 0 OR MATCH(GTYPE,'YGRD') gt 0 )
+	--仪表规则
+	NEW RRULE /$!drawingName/REPR/ALL/INST
+	STYF STYLE /$!drawingName/STYL/INST
+	CRIT  ALL INST 
+	--管道规则
+	$(
+	NEW RRULE /$!drawingName/REPR/ALL/PIPE-SINGLE
+	STYF STYLE /$!drawingName/STYL/PIPE-SINGLE
+	CRIT  (ALL TUBING ALL ELBO ALL TEE ALL OLET ALL CROS) WITH (ABORE LT 200)
+	$)
+	NEW RRULE /$!drawingName/REPR/ALL/PIPE
+	STYF STYLE /$!drawingName/STYL/PIPE
+	CRIT  (ALL PIPE)
+	--设备规则
+	NEW RRULE /$!drawingName/REPR/ALL/EQUI
+	STYF STYLE /$!drawingName/STYL/EQUI
+	CRIT  ALL EQUIPMENT
+	--结构规则
+	NEW RRULE /$!drawingName/REPR/ALL/ASL
+	STYF STYLE /$!drawingName/STYL/ASL
+	CRIT  ALL SUBSTRUCTURE
+	--结构规则
+	NEW RRULE /$!drawingName/REPR/ALL/STEEL
+	STYF STYLE /$!drawingName/STYL/STEEL
+	CRIT  ALL FRMWORK ALL SBFR ALL SCTN
+	--暖通规则
+	NEW RRULE /$!drawingName/REPR/ALL/HVAC
+	STYF STYLE /$!drawingName/STYL/HVAC
+	CRIT  ALL HVAC
+endmethod
+-------------------------------------------------------------------
+--新建消隐风格
+define method .GenerateHSTYL(!drawingName is string)
+	NEW RPLB /$!drawingName/HSTYL
+	NEW HSTYL /$!drawingName/HSTYL/ALL
+	OLSTYL SolidThick
+	OLCOLO 2
+	FSTYLE SystemStyle 1
+	FCOLOUR 5
+endmethod
+-------------------------------------------------------------------
+--新建消隐规则
+define method .GenerateHRUL(!drawingName is string)
+	NEW RPLB /$!drawingName/HRUL
+	NEW HRST /$!drawingName/HRUL/ALL
+	NEW HRULE /$!drawingName/HRUL/ALL/HatchAll
+	HSTYF HSTYLE /$!drawingName/HSTYL/ALL
+	CRIT  ALL
+endmethod
+-------------------------------------------------------------------
+--新建切面规则
+define method .GeneratePLLB(!drawingName is string)
+	NEW PLLB /$!drawingName/PLANES
+endmethod
+-------------------------------------------------------------------
+--新建tagrule
+define method .GenerateTRLB(!drawingName is string)
+	NEW TRLB /$!drawingName/TAGRULE
+endmethod
+-------------------------------------------------------------------
+--新建drawlist
+define method .GenerateDLLB(!drawingName is string,!drawlist is array,!removelist is array)
+	NEW DLLB /$!drawingName/DRAWLIST
+	NEW IDLIST /$!drawingName/DRAWLIST/DRWG
+	do !ptrdrawlist indices !drawlist
+		NEW ADDENTRY
+		!type = !drawlist[$!ptrdrawlist].dbref().type
+		IDNM $!type $!drawlist[$!ptrdrawlist]
+	enddo
+	
+	do !ptrremovelist indices !removelist
+		NEW REME
+		!type = !removelist[$!ptrremovelist].dbref().type
+		IDNM $!type $!removelist[$!ptrremovelist]
+	enddo
+endmethod
+-------------------------------------------------------------------
+--标准的四周引线样式
+define method .GenerateDimensionLabels(!drawname is string,!size is string)
+		NEW LALB /$!drawname/DIMLABELS
+		FONT 1
+		GBOX 1mm
+		CHEI 2.5mm
+		CSPA 0
+		LSPA 0
+		SIZE $!size
+		TXCOLO 10
+		NLSTYL Solid
+		NLCOLO 1
+		LLSTYL Solid
+		LLCOLO 1
+		FSTYLE Off
+		FCOLOUR 1
+		
+		--右侧标准样式
+		NEW SYTM /$!drawname/DIMLABELS/EAST
+		XYPS X 120mm Y 150mm
+		JUST Left
+		ALIGN Hbody
+		FONT 1
+		CHEI 2.5mm
+		CSPA 0
+		LSPA 0
+		TXCOLO 1
+		NLSTYL Solid
+		NLCOLO 1
+		LLSTYL Solid
+		LLCOLO 1
+		FSTYLE Off
+		FCOLOUR 1
+		MSTYLE Stop Scale 1
+		MCOLOUR 1
+		PPDI 0
+		NEW STRAIGHT
+		Fpt Offset X 0mm Y 0mm
+		Tpt Offset X 40mm Y 0mm
+		NLSTYL Solid
+		NLCOLO 1
+		NEW TEXTPRIMITIVE
+		Origin Offset X 40mm Y 0mm
+		FONT 1
+		CHEI 2mm
+		CSPA 0
+		LSPA 0
+		JUST right
+		ALIGN Hbody
+		BTEX '#ATEX'
+		TXCOLO 1
+		
+		--左侧标准样式
+		NEW SYTM /$!drawname/DIMLABELS/WEST
+		XYPS X 80mm Y 150mm
+		JUST Left
+		ALIGN Hbody
+		FONT 1
+		CHEI 2.5mm
+		CSPA 0
+		LSPA 0
+		TXCOLO 1
+		NLSTYL Solid
+		NLCOLO 1
+		LLSTYL Solid
+		LLCOLO 1
+		FSTYLE Off
+		FCOLOUR 1
+		MSTYLE Stop Scale 1
+		MCOLOUR 1
+		PPDI 0
+		NEW STRAIGHT
+		Fpt Offset X 0mm Y 0mm
+		Tpt Offset X -40mm Y 0mm
+		NLSTYL Solid
+		NLCOLO 1
+		NEW TEXTPRIMITIVE
+		Origin Offset X -40mm Y 0mm
+		FONT 1
+		CHEI 2.5mm
+		CSPA 0
+		LSPA 0
+		JUST left
+		ALIGN Hbody
+		BTEX '#ATEX'
+		TXCOLO 1
+		
+		--上方标准样式
+		NEW SYTM /$!drawname/DIMLABELS/NORTH
+		XYPS X 100mm Y 170mm
+		JUST Left
+		ALIGN Hbody
+		FONT 1
+		CHEI 2.5mm
+		CSPA 0
+		LSPA 0
+		TXCOLO 1
+		NLSTYL Solid
+		NLCOLO 1
+		LLSTYL Solid
+		LLCOLO 1
+		FSTYLE Off
+		FCOLOUR 1
+		MSTYLE Stop Scale 1
+		MCOLOUR 1
+		PPDI 0
+		NEW STRAIGHT
+		Fpt Offset X 0mm Y 0mm
+		Tpt Offset X 0mm Y 40mm
+		NLSTYL Solid
+		NLCOLO 1
+		NEW TEXTPRIMITIVE
+		Origin Offset X 0mm Y 40mm
+		ADEG 90degree
+		FONT 1
+		CHEI 2.5mm
+		CSPA 0
+		LSPA 0
+		JUST right
+		ALIGN Hbody
+		BTEX '#ATEX'
+		TXCOLO 1
+		
+		--下方标准样式
+		NEW SYTM /$!drawname/DIMLABELS/SOUTH
+		XYPS X 100mm Y 130mm
+		JUST Left
+		ALIGN Hbody
+		FONT 1
+		CHEI 2.5mm
+		CSPA 0
+		LSPA 0
+		TXCOLO 1
+		NLSTYL Solid
+		NLCOLO 1
+		LLSTYL Solid
+		LLCOLO 1
+		FSTYLE Off
+		FCOLOUR 1
+		MSTYLE Stop Scale 1
+		MCOLOUR 1
+		PPDI 0
+		NEW STRAIGHT
+		Fpt Offset X 0mm Y 0mm
+		Tpt Offset X 0mm Y -40mm
+		NLSTYL Solid
+		NLCOLO 1
+		NEW TEXTPRIMITIVE
+		Origin Offset X 0mm Y -40mm
+		ADEG 90degree
+		FONT 1
+		CHEI 2.5mm
+		CSPA 0
+		LSPA 0
+		JUST left
+		ALIGN Hbody
+		BTEX '#ATEX'
+		TXCOLO 1
+endmethod
+
+--------------------------------------------------------------------------------------
+--【本次新增·按你的要求】DIMLABELS 的"不换行"版本（每个方向一份）：
+--   · 命名：原样式名后加 -Bbody（DIMLABELS/EAST-Bbody …）；
+--   · 文本图元（TEXTPRIMITIVE）的 Alignment 设为 **Bbody**（SYTM 级 ALIGN 也一起设，等效）；
+--   · SYTM 位置在原来四个的基础上**往东 200mm**（原 X 80/120/100/100 → +200 后互不干扰）；
+--   · 用途：管线号（没有 EL）用这一套 → 不需要 #/ 换行，导出/居中不会再出格式问题；
+--     只有 BOP EL. 那种才用原样式换行（见 DimensionGenerator 里 [12] 的选法）。
+--   【为什么另建一份而不是改原四个】原四个是带引线换行的样式，仍在用（BOP EL 那条）。
+define method .GenerateBbodyLabelLib(!drawingName is string,!size is string)
+		-- 【本次修复 23.125】原来用 do 循环共用一套几何参数，和原四个样式并不一致
+		--   （原样式每方向的 JUST / ADEG 90 / 文字 CHEI / 文字原点都不同）。
+		--   现在四个方向**逐条照抄 GenerateDimensionLabels 里的原样式**，只改三处：
+		--     ① 名字后缀 -Bbody；② XYPS 的 X 往东 +200mm（Y 不变）；
+		--     ③ SYTM 与 TEXTPRIMITIVE 的 ALIGN：Hbody → Bbody。
+		--   这样 -Bbody 版与换行版的版面完全一致，只有"能否自动换行"这一条差别。
+
+		--右侧（不换行）EAST-Bbody ：原 XYPS 120,150 → 320,150
+		NEW SYTM /$!drawingName/DIMLABELS/EAST-Bbody
+		XYPS X 320mm Y 150mm
+		JUST Left
+		ALIGN Bbody
+		FONT 1
+		CHEI 2.5mm
+		CSPA 0
+		LSPA 0
+		TXCOLO 1
+		NLSTYL Solid
+		NLCOLO 1
+		LLSTYL Solid
+		LLCOLO 1
+		FSTYLE Off
+		FCOLOUR 1
+		MSTYLE Stop Scale 1
+		MCOLOUR 1
+		PPDI 0
+		NEW STRAIGHT
+		Fpt Offset X 0mm Y 0mm
+		Tpt Offset X 40mm Y 0mm
+		NLSTYL Solid
+		NLCOLO 1
+		NEW TEXTPRIMITIVE
+		Origin Offset X 40mm Y 0mm
+		FONT 1
+		CHEI 2mm
+		CSPA 0
+		LSPA 0
+		JUST right
+		ALIGN Bbody
+		BTEX '#ATEX'
+		TXCOLO 1
+
+		--左侧（不换行）WEST-Bbody ：原 XYPS 80,150 → 280,150
+		NEW SYTM /$!drawingName/DIMLABELS/WEST-Bbody
+		XYPS X 280mm Y 150mm
+		JUST Left
+		ALIGN Bbody
+		FONT 1
+		CHEI 2.5mm
+		CSPA 0
+		LSPA 0
+		TXCOLO 1
+		NLSTYL Solid
+		NLCOLO 1
+		LLSTYL Solid
+		LLCOLO 1
+		FSTYLE Off
+		FCOLOUR 1
+		MSTYLE Stop Scale 1
+		MCOLOUR 1
+		PPDI 0
+		NEW STRAIGHT
+		Fpt Offset X 0mm Y 0mm
+		Tpt Offset X -40mm Y 0mm
+		NLSTYL Solid
+		NLCOLO 1
+		NEW TEXTPRIMITIVE
+		Origin Offset X -40mm Y 0mm
+		FONT 1
+		CHEI 2.5mm
+		CSPA 0
+		LSPA 0
+		JUST left
+		ALIGN Bbody
+		BTEX '#ATEX'
+		TXCOLO 1
+
+		--上方（不换行）NORTH-Bbody ：原 XYPS 100,170 → 300,170
+		NEW SYTM /$!drawingName/DIMLABELS/NORTH-Bbody
+		XYPS X 300mm Y 170mm
+		JUST Left
+		ALIGN Bbody
+		FONT 1
+		CHEI 2.5mm
+		CSPA 0
+		LSPA 0
+		TXCOLO 1
+		NLSTYL Solid
+		NLCOLO 1
+		LLSTYL Solid
+		LLCOLO 1
+		FSTYLE Off
+		FCOLOUR 1
+		MSTYLE Stop Scale 1
+		MCOLOUR 1
+		PPDI 0
+		NEW STRAIGHT
+		Fpt Offset X 0mm Y 0mm
+		Tpt Offset X 0mm Y 40mm
+		NLSTYL Solid
+		NLCOLO 1
+		NEW TEXTPRIMITIVE
+		Origin Offset X 0mm Y 40mm
+		ADEG 90degree
+		FONT 1
+		CHEI 2.5mm
+		CSPA 0
+		LSPA 0
+		JUST right
+		ALIGN Bbody
+		BTEX '#ATEX'
+		TXCOLO 1
+
+		--下方（不换行）SOUTH-Bbody ：原 XYPS 100,130 → 300,130
+		NEW SYTM /$!drawingName/DIMLABELS/SOUTH-Bbody
+		XYPS X 300mm Y 130mm
+		JUST Left
+		ALIGN Bbody
+		FONT 1
+		CHEI 2.5mm
+		CSPA 0
+		LSPA 0
+		TXCOLO 1
+		NLSTYL Solid
+		NLCOLO 1
+		LLSTYL Solid
+		LLCOLO 1
+		FSTYLE Off
+		FCOLOUR 1
+		MSTYLE Stop Scale 1
+		MCOLOUR 1
+		PPDI 0
+		NEW STRAIGHT
+		Fpt Offset X 0mm Y 0mm
+		Tpt Offset X 0mm Y -40mm
+		NLSTYL Solid
+		NLCOLO 1
+		NEW TEXTPRIMITIVE
+		Origin Offset X 0mm Y -40mm
+		ADEG 90degree
+		FONT 1
+		CHEI 2.5mm
+		CSPA 0
+		LSPA 0
+		JUST left
+		ALIGN Bbody
+		BTEX '#ATEX'
+		TXCOLO 1
+endmethod
+-------------------------------------------------------------------
+--新建SYMBOL样式
+define method .GenerateSylbRule(!drawingName is string,!size is string)
+	-- 【重要修正】SYLB 不能建在 DRWG 这一层：`NEW SYLB /<图名>/SYLB` 会报
+	--   (41,8) Cannot create a SYLB at this level.
+	--   老版 sylbrule 的做法是"先导航到 /<图名>/LIBY，再建 SYLB"——即 SYLB 属于 LIBY。
+	--   这里直接写成 /<图名>/LIBY/SYLB（LIBY 由 GenerateLiby 建好，在 Generate 流程里先于本方法执行）。
+	-- 另外按老版做法**先导航到 LIBY** 再建：这样无论 PML 把后面的路径当"父级"还是当"当前层级下的名字"，
+	-- 都能落在 LIBY 这个合法层级上（双保险）。
+	!libyPath = '/' + !drawingName + '/LIBY'
+	$!libyPath
+	!sylbNew = true
+	NEW SYLB /$!drawingName/LIBY/SYLB
+	-- 已存在时不报错、也不重建：直接进到它下面继续建 SYTM（幂等，重复出图安全）
+	handle(41,12)
+		!sylbNew = false
+	endhandle
+	if(!sylbNew.not())then
+		!sylbPath = '/' + !drawingName + '/LIBY/SYLB'
+		$!sylbPath
+	endif
+	CHEI 4mm
+	CSPA 0
+	LSPA 0
+	SIZE $!size
+	TXCOLO 10
+	NLSTYL Solid
+	NLCOLO 1
+	LLSTYL Solid
+	LLCOLO 1
+	FSTYLE Off
+	FCOLOUR 1
+	
+	--北向标样式（同样在 LIBY 下，与上面的 SYLB 路径一致）
+	NEW SYTM /$!drawingName/LIBY/SYLB/SYTM
+	--【本次修改·按你的要求】箭头 SYTM 里所有成员的线/文字/填充颜色由 1（灰）改成 10
+	XYPS X 50mm Y 50mm
+	JUST Left
+	ALIGN Bbody
+	CHEI 4mm
+	CSPA 0
+	LSPA 0
+	TXCOLO 10
+	NLSTYL SolidThick
+	NLCOLO 10
+	LLSTYL Solid
+	LLCOLO 10
+	FSTYLE Off
+	FCOLOUR 10
+	MSTYLE Stop Scale 4
+	MCOLOUR 10
+	PPDI 0
+	
+	NEW CIRCLE
+	Origin Centre Offset X 0mm Y 0mm
+	DIAM 30mm
+	NLSTYL Solid
+	NLCOLO 10
+	FSTYLE Off
+	FCOLOUR 10
+
+	END
+	NEW STRAIGHT
+	Fpt Offset X 0mm Y -25mm
+	Tpt Offset X 0mm Y 25mm
+	NLSTYL Solid
+	NLCOLO 10
+
+	END
+	NEW STRAIGHT
+	Fpt Offset X -25mm Y 0mm
+	Tpt Offset X 25mm Y 0mm
+	NLSTYL Solid
+	NLCOLO 10
+
+	END
+	NEW TEXTPRIMITIVE
+	Origin Offset X 0mm Y 30mm
+	CHEI 5mm
+	CSPA 0
+	LSPA 0
+	JUST Left
+	ALIGN Bbody
+	BTEX 'PN'
+	TXCOLO 10
+
+	END
+	NEW TEXTPRIMITIVE
+	Origin Offset X -15mm Y 0mm
+	CHEI 5mm
+	CSPA 0
+	LSPA 0
+	JUST Right
+	ALIGN Bbody
+	--【23.76 按你的要求】恢复老版度符号：老版 `pipelayout.pmlfrm:4207` 就是 `BTEX '270°'`。
+	--   本文件 23.75 起为 UTF-8 with BOM，`°` 可正常编译；四个方位角标签一并恢复。
+	BTEX '270°'
+	TXCOLO 10
+
+	END
+	NEW TEXTPRIMITIVE
+	Origin Offset X 0mm Y -25mm
+	CHEI 5mm
+	CSPA 0
+	LSPA 0
+	JUST Left
+	ALIGN Bbody
+	BTEX '180°'
+	TXCOLO 10
+
+	END
+	NEW TEXTPRIMITIVE
+	Origin Offset X 15mm Y 0mm
+	CHEI 5mm
+	CSPA 0
+	LSPA 0
+	JUST Left
+	ALIGN Bbody
+	BTEX '90°'
+	TXCOLO 10
+
+	END
+	NEW TEXTPRIMITIVE
+	Origin Offset X 0mm Y 15mm
+	CHEI 5mm
+	CSPA 0
+	LSPA 0
+	JUST Left
+	ALIGN Bbody
+	BTEX '0°'
+	TXCOLO 10
+
+	END
+	NEW STRAIGHT
+	Fpt Offset X 0mm Y 15mm
+	Tpt Offset X 0.5mm Y -15mm
+	NLSTYL Solid
+	NLCOLO 10
+
+	END
+	NEW STRAIGHT
+	Fpt Offset X 0mm Y 15mm
+	Tpt Offset X -0.5mm Y -15mm
+	NLSTYL Solid
+	NLCOLO 10
+
+	END
+	NEW STRAIGHT
+	Fpt Offset X 0mm Y 15mm
+	Tpt Offset X 1mm Y -14.9mm
+	NLSTYL Solid
+	NLCOLO 10
+
+	END
+	NEW STRAIGHT
+	Fpt Offset X 0mm Y 15mm
+	Tpt Offset X -1mm Y -14.9mm
+	NLSTYL Solid
+	NLCOLO 10
+
+	END
+	NEW STRAIGHT
+	Fpt Offset X 0mm Y 15mm
+	Tpt Offset X 1.5mm Y -14.9mm
+	NLSTYL Solid
+	NLCOLO 10
+
+	END
+	NEW STRAIGHT
+	Fpt Offset X 0mm Y 15mm
+	Tpt Offset X -1.5mm Y -14.9mm
+	NLSTYL Solid
+	NLCOLO 10
+
+	END
+	NEW STRAIGHT
+	Fpt Offset X 0mm Y 15mm
+	Tpt Offset X 2mm Y -14.9mm
+	NLSTYL Solid
+	NLCOLO 10
+
+	END
+	NEW STRAIGHT
+	Fpt Offset X 0mm Y 15mm
+	Tpt Offset X -2mm Y -14.9mm
+	NLSTYL Solid
+	NLCOLO 10
+endmethod
+-------------------------------------------------------------------
+--新建管口标注自定义标注样式
+define method .GenerateNozzLib(!drawingName is string,!size is string)
+	NEW LALB /$!drawingName/NOZZLES
+	FONT 1
+	GBOX 1mm
+	CHEI 2.5mm
+	CSPA 0
+	LSPA 0
+	SIZE $!size
+	TXCOLO 10
+	NLSTYL Solid
+	NLCOLO 1
+	LLSTYL Solid
+	LLCOLO 1
+	FSTYLE Off
+	FCOLOUR 1
+	NEW SYTM /$!drawingName/NOZZLES/NOZZ
+	XYPS X 105mm Y 195mm
+	JUST Left
+	ALIGN Bbody
+	FONT 1
+	CHEI 2.5mm
+	CSPA 0
+	LSPA 0
+	TXCOLO 10
+	NLSTYL Solid
+	NLCOLO 1
+	LLSTYL Solid
+	LLCOLO 1
+	FSTYLE Off
+	FCOLOUR 1
+	MSTYLE Stop Scale 1
+	MCOLOUR 1
+	PPDI 0
+	NEW TEXTPRIMITIVE
+	Origin Offset X 0mm Y 0mm
+	FONT 1
+	CHEI 2.5mm
+	CSPA 0
+	LSPA 0
+	JUST Centre
+	ALIGN Hbody
+	BTEX '#ATEX'
+	TXCOLO 10
+endmethod
+-------------------------------------------------------------------
+--新建管道标注自定义标注样式
+define method .GeneratePipelineLabelLib(!drawingName is string,!size is string)
+	NEW LALB /$!drawingName/PIPELINELABELS
+	FONT 1
+	GBOX 1mm
+	CHEI 2.5mm
+	CSPA 0
+	LSPA 0
+	SIZE $!size
+	TXCOLO 10
+	NLSTYL Solid
+	NLCOLO 1
+	LLSTYL Solid
+	LLCOLO 1
+	FSTYLE Off
+	FCOLOUR 1
+	--支吊架的自定义样式
+	NEW SYTM /$!drawingName/PIPELINELABELS/PIPE
+	XYPS X 105mm Y 195mm
+	JUST Left
+	ALIGN Bbody
+	FONT 1
+	CHEI 2.5mm
+	CSPA 0
+	LSPA 0
+	TXCOLO 10
+	NLSTYL Solid
+	NLCOLO 1
+	LLSTYL Solid
+	LLCOLO 1
+	FSTYLE Off
+	FCOLOUR 1
+	MSTYLE Stop Scale 1
+	MCOLOUR 1
+	PPDI 0
+	NEW MARKPRIMITIVE
+	Origin Offset X 0mm Y 0mm
+	MSTYLE Stop Scale 1
+	MCOLOUR 9
+	NEW DIAMOND
+	Origin Centre Offset X 0mm Y 0mm
+	XLEN 8mm
+	YLEN 8mm
+	Adegrees 45
+	NLSTYL Solid
+	NLCOLO 10
+	FSTYLE Off
+	FCOLOUR 1
+	NEW TEXTPRIMITIVE
+	Origin Offset X 0mm Y 0mm
+	FONT 1
+	CHEI 2.5mm
+	CSPA 0
+	LSPA 0
+	JUST Centre
+	ALIGN Hbody
+	BTEX '#ATEX'
+	TXCOLO 10
+endmethod
+-------------------------------------------------------------------
+--新建支架标注自定义标注样式
+define method .GenerateSuppLabelLib(!drawingName is string,!size is string)
+	NEW LALB /$!drawingName/SUPPLABELS
+	FONT 1
+	GBOX 1mm
+	CHEI 2.5mm
+	CSPA 0
+	LSPA 0
+	SIZE $!size
+	TXCOLO 10
+	NLSTYL Solid
+	NLCOLO 1
+	LLSTYL Solid
+	LLCOLO 1
+	FSTYLE Off
+	FCOLOUR 1
+	--支吊架的自定义样式
+	NEW SYTM /$!drawingName/SUPPLABELS/SUPP
+	XYPS X 105mm Y 195mm
+	JUST Left
+	ALIGN Bbody
+	FONT 1
+	CHEI 2.5mm
+	CSPA 0
+	LSPA 0
+	TXCOLO 10
+	NLSTYL Solid
+	NLCOLO 1
+	LLSTYL Solid
+	LLCOLO 1
+	FSTYLE Off
+	FCOLOUR 1
+	MSTYLE Stop Scale 1
+	MCOLOUR 1
+	PPDI 0
+	NEW MARKPRIMITIVE
+	Origin Offset X 0mm Y 0mm
+	MSTYLE Stop Scale 1
+	MCOLOUR 9
+	NEW DIAMOND
+	Origin Centre Offset X 0mm Y 0mm
+	XLEN 7mm
+	YLEN 7mm
+	NLSTYL Solid
+	NLCOLO 10
+	FSTYLE Off
+	FCOLOUR 1
+	NEW TEXTPRIMITIVE
+	Origin Offset X 0mm Y 0mm
+	FONT 1
+	CHEI 2.5mm
+	CSPA 0
+	LSPA 0
+	JUST Centre
+	ALIGN Hbody
+	BTEX '#ATEX'
+	TXCOLO 10
+endmethod
+-------------------------------------------------------------------
+--新建轴网标注自定义标注样式
+define method .GenerateGridLabelLib(!drawingName is string,!size is string)
+	NEW LALB /$!drawingName/GRIDLABELS
+	FONT 1
+	GBOX 1mm
+	CHEI 4
+	CSPA 0
+	LSPA 0
+	SIZE $!size
+	TXCOLO 10
+	NLSTYL Solid
+	NLCOLO 1
+	LLSTYL Solid
+	LLCOLO 1
+	FSTYLE Off
+	FCOLOUR 1
+
+	NEW SYTM /$!drawingName/GRIDLABELS/EAST
+	XYPS X 80 Y 50mm
+	JUST Left
+	ALIGN Hbody
+	FONT 1
+	CHEI 4
+	CSPA 0
+	LSPA 0
+	TXCOLO 10
+	NLSTYL Solid
+	NLCOLO 1
+	LLSTYL Solid
+	LLCOLO 1
+	FSTYLE Off
+	FCOLOUR 1
+	MSTYLE Stop Scale 1
+	MCOLOUR 1
+	PPDI 0
+	NEW MARKPRIMITIVE
+	Origin Offset X 8 Y 0
+	MSTYLE Stop Scale 1
+	MCOLOUR 9
+	END
+	--【本次修改·按你的要求】这里原来有一条 STRAIGHT，但 Fpt 与 Tpt 是同一个点
+	--   （零长度，PDMS 每次建图都报 Warning: ... Two points are superimposed）。
+	--   零长度直线画出来什么都没有，所以直接不建它 —— 警告消失，图形不变。
+	--   注：这不是错误而是 Warning，handle 抓不到；skip 也只能用在 do 循环里，故用『不创建』实现跳过。
+	NEW CIRCLE
+	Origin Centre Offset X 8 Y 0
+	DIAM 16
+	NLSTYL Solid
+	NLCOLO 1
+	FSTYLE Off
+	FCOLOUR 1
+	END
+	NEW TEXTPRIMITIVE
+	Origin Offset X 8 Y 0
+	FONT 1
+	CHEI 4
+	CSPA 0
+	LSPA 0
+	JUST Centre
+	ALIGN Hbody
+	BTEX '#ATEXT'
+	TXCOLO 10
+	
+	NEW SYTM /$!drawingName/GRIDLABELS/WEST
+	XYPS X 20mm Y 50mm
+	JUST Left
+	ALIGN Hbody
+	FONT 1
+	CHEI 4
+	CSPA 0
+	LSPA 0
+	TXCOLO 10
+	NLSTYL Solid
+	NLCOLO 1
+	LLSTYL Solid
+	LLCOLO 1
+	FSTYLE Off
+	FCOLOUR 1
+	MSTYLE Stop Scale 1
+	MCOLOUR 1
+	PPDI 0
+	NEW MARKPRIMITIVE
+	Origin Offset X -8 Y 0
+	MSTYLE Stop Scale 1
+	MCOLOUR 9
+	END
+	--【本次修改·按你的要求】这里原来有一条 STRAIGHT，但 Fpt 与 Tpt 是同一个点
+	--   （零长度，PDMS 每次建图都报 Warning: ... Two points are superimposed）。
+	--   零长度直线画出来什么都没有，所以直接不建它 —— 警告消失，图形不变。
+	--   注：这不是错误而是 Warning，handle 抓不到；skip 也只能用在 do 循环里，故用『不创建』实现跳过。
+	NEW CIRCLE
+	Origin Centre Offset X -8 Y 0
+	DIAM 15mm
+	NLSTYL Solid
+	NLCOLO 1
+	FSTYLE Off
+	FCOLOUR 1
+	END
+	NEW TEXTPRIMITIVE
+	Origin Offset X -8 Y 0
+	FONT 1
+	CHEI 4
+	CSPA 0
+	LSPA 0
+	JUST Centre
+	ALIGN Hbody
+	BTEX '#ATEXT'
+	TXCOLO 10
+	
+	NEW SYTM /$!drawingName/GRIDLABELS/NORTH
+	XYPS X 50mm Y 80mm
+	JUST Left
+	ALIGN Hbody
+	FONT 1
+	CHEI 4
+	CSPA 0
+	LSPA 0
+	TXCOLO 10
+	NLSTYL Solid
+	NLCOLO 1
+	LLSTYL Solid
+	LLCOLO 1
+	FSTYLE Off
+	FCOLOUR 1
+	MSTYLE Stop Scale 1
+	MCOLOUR 1
+	PPDI 0
+	NEW MARKPRIMITIVE
+	Origin Offset X 0 Y 8
+	MSTYLE Stop Scale 1
+	MCOLOUR 9
+	END
+	--【本次修改·按你的要求】这里原来有一条 STRAIGHT，但 Fpt 与 Tpt 是同一个点
+	--   （零长度，PDMS 每次建图都报 Warning: ... Two points are superimposed）。
+	--   零长度直线画出来什么都没有，所以直接不建它 —— 警告消失，图形不变。
+	--   注：这不是错误而是 Warning，handle 抓不到；skip 也只能用在 do 循环里，故用『不创建』实现跳过。
+	NEW CIRCLE
+	Origin Centre Offset X 0 Y 8
+	DIAM 15mm
+	NLSTYL Solid
+	NLCOLO 1
+	FSTYLE Off
+	FCOLOUR 1
+	END
+	NEW TEXTPRIMITIVE
+	Origin Offset X 0 Y 8
+	FONT 1
+	CHEI 4
+	CSPA 0
+	LSPA 0
+	JUST Centre
+	ALIGN Hbody
+	BTEX '#ATEXT'
+	TXCOLO 10
+	
+	NEW SYTM /$!drawingName/GRIDLABELS/SOUTH
+	XYPS X 50mm Y 20mm
+	JUST Left
+	ALIGN Hbody
+	FONT 1
+	CHEI 4
+	CSPA 0
+	LSPA 0
+	TXCOLO 10
+	NLSTYL Solid
+	NLCOLO 1
+	LLSTYL Solid
+	LLCOLO 1
+	FSTYLE Off
+	FCOLOUR 1
+	MSTYLE Stop Scale 1
+	MCOLOUR 1
+	PPDI 0
+	NEW MARKPRIMITIVE
+	Origin Offset X 0 Y -8
+	MSTYLE Stop Scale 1
+	MCOLOUR 9
+	END
+	--【本次修改·按你的要求】这里原来有一条 STRAIGHT，但 Fpt 与 Tpt 是同一个点
+	--   （零长度，PDMS 每次建图都报 Warning: ... Two points are superimposed）。
+	--   零长度直线画出来什么都没有，所以直接不建它 —— 警告消失，图形不变。
+	--   注：这不是错误而是 Warning，handle 抓不到；skip 也只能用在 do 循环里，故用『不创建』实现跳过。
+	NEW CIRCLE
+	Origin Centre Offset X 0 Y -8
+	DIAM 15mm
+	NLSTYL Solid
+	NLCOLO 1
+	FSTYLE Off
+	FCOLOUR 1
+	END
+	NEW TEXTPRIMITIVE
+	Origin Offset X 0 Y -8
+	FONT 1
+	CHEI 4
+	CSPA 0
+	LSPA 0
+	JUST Centre
+	ALIGN Hbody
+	BTEX '#ATEXT'
+	TXCOLO 10
+endmethod
+-------------------------------------------------------------------
+--新建仪表标注自定义标注样式
+define method .GenerateInstlabelLib(!drawingName is string,!size is string)
+	--【本次新增·按你的要求】仪表点位图的图面标注用 6 号（靛蓝）；
+	--   其它图种（管道布置图等）仍是老版的 10 号（白），行为不变。
+	--   注：这条标注里"白色 10 号"的就是文字（LALB / SYTM / TEXTPRIMITIVE 三处 TXCOLO）；
+	--   小圆圈(1 号)与定位点(9 号)本来不是白色，按你的说法这次不动。
+	!cInstLbl = 10
+	if(!this.layoutKind eq 'InstLayout')then
+		!cInstLbl = 6
+	endif
+	NEW LALB /$!drawingName/INSTLABELS
+	FONT 1
+	GBOX 1mm
+	CHEI 2.5mm
+	CSPA 0
+	LSPA 0
+	SIZE $!size
+	TXCOLO $!cInstLbl
+	NLSTYL Solid
+	NLCOLO 1
+	LLSTYL Solid
+	LLCOLO 1
+	FSTYLE Off
+	FCOLOUR 1
+	--仪表的自定义样式
+	NEW SYTM /$!drawingName/INSTLABELS/INST
+	XYPS X 50mm Y 50mm
+	JUST Left
+	ALIGN Bbody
+	FONT 1
+	CHEI 2mm
+	CSPA 0
+	LSPA 0
+	TXCOLO $!cInstLbl
+	NLSTYL Solid
+	NLCOLO 1
+	LLSTYL Solid
+	LLCOLO 1
+	FSTYLE Off
+	FCOLOUR 1
+	MSTYLE Stop Scale 1
+	MCOLOUR 1
+	PPDI 0
+	NEW MARKPRIMITIVE
+	Origin Offset X 0mm Y 0mm
+	MSTYLE Stop Scale 1
+	MCOLOUR 9
+	END
+	--【本次修改·按你的要求】这里原来有一条 STRAIGHT，但 Fpt 与 Tpt 是同一个点
+	--   （零长度，PDMS 每次建图都报 Warning: ... Two points are superimposed）。
+	--   零长度直线画出来什么都没有，所以直接不建它 —— 警告消失，图形不变。
+	--   注：这不是错误而是 Warning，handle 抓不到；skip 也只能用在 do 循环里，故用『不创建』实现跳过。
+	NEW CIRCLE
+	Origin Centre Offset X 0mm Y 0mm
+	DIAM 8mm
+	NLSTYL Solid
+	NLCOLO 1
+	FSTYLE Off
+	FCOLOUR 1
+	END
+	NEW TEXTPRIMITIVE
+	Origin Offset X 0mm Y 0mm
+	FONT 1
+	--【2026-10-31·按你的要求】仪表气泡里的文字图元 CHEI 2.5 → 2mm
+	CHEI 2mm
+	CSPA 0
+	LSPA 0
+	JUST Centre
+	ALIGN Hbody
+	BTEX '#ATEXT'
+	TXCOLO $!cInstLbl
+endmethod
+-------------------------------------------------------------------
+--【本次新增·按你的要求】设备名标注的符号库（EquiLayout 用）：
+--   与其它标注库同一结构，只是字号按你的要求是 **5mm**、颜色 10 号；
+--   SLABEL 引用它以后由 AnnotationOptimization 做贪心避让。
+define method .GenerateEquiLabelLib(!drawingName is string,!size is string)
+	NEW LALB /$!drawingName/EQUILABELS
+	FONT 1
+	GBOX 1mm
+	CHEI 5mm
+	CSPA 0
+	LSPA 0
+	SIZE $!size
+	TXCOLO 10
+	NLSTYL Solid
+	NLCOLO 10
+	LLSTYL Solid
+	LLCOLO 10
+	FSTYLE Off
+	FCOLOUR 10
+	--设备名的自定义样式
+	NEW SYTM /$!drawingName/EQUILABELS/EQUI
+	XYPS X 50mm Y 50mm
+	JUST Left
+	ALIGN Bbody
+	FONT 1
+	CHEI 5mm
+	CSPA 0
+	LSPA 0
+	TXCOLO 10
+	NLSTYL Solid
+	NLCOLO 10
+	LLSTYL Solid
+	LLCOLO 10
+	FSTYLE Off
+	FCOLOUR 10
+	NEW TEXTPRIMITIVE
+	Origin Offset X 0mm Y 0mm
+	FONT 1
+	CHEI 5mm
+	CSPA 0
+	LSPA 0
+	JUST Centre
+	ALIGN Hbody
+	BTEX '#ATEXT'
+	TXCOLO 10
+endmethod

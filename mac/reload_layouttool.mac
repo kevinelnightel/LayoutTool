@@ -1,0 +1,46 @@
+-- ==========================================================================
+--  LayoutTool - reload everything (single command)
+--
+--  Usage:  $m %PMLLIB%\LayoutTool\mac\reload_layouttool.mac
+--
+--  When: after editing any object\*.pmlobj or form\*.pmlfrm
+--    1) Objects MUST be reloaded, otherwise the old module stays in memory
+--       and you get  (2,779) Method <XXX>.<method> not found
+--    2) After reloading the FORM, close and reopen the form window so its
+--       init code runs again (e.g. MethodSetDrawingSize recomputes the
+--       table origins for the current sheet size). An open window does
+--       NOT refresh itself.
+--    3) If only one file changed, reloading that one is enough.
+--
+--  Scope: 16 objects + 1 form of this plugin.
+--         CostElement  DimensionGenerator  DrawingExporter  DrawingGenerator
+--         GridDataGet  GridGenerator       LabelGenerator   LimitDbelementGet
+--         LimitsNoteGenerator  NoteGenerator  NozzleOrientationGenerator
+--         SheetGenerator  TextWriter       ViewAnnotation   ViewConfig
+--         XmlGenerator
+--  Changed 23.162: MatchLineGenerator removed (0 callers since the Batch tab
+--      was deleted; source parked in backup\ so it can be restored).
+--      mac\PositionEastQickSort.pmlfnc removed (0 callers; also in backup\).
+--      TextWriter.pmlobj added - it MUST be loaded before the generators
+--      that call it, so it is listed explicitly.
+--  Note:  PML functions in *.pmlfnc are picked up by "pml rehash all".
+-- ==========================================================================
+pml rehash all
+pml reload object costelement
+pml reload object dimensiongenerator
+pml reload object drawingexporter
+pml reload object drawinggenerator
+pml reload object griddataget
+pml reload object gridgenerator
+pml reload object labelgenerator
+pml reload object limitdbelementget
+pml reload object limitsnotegenerator
+pml reload object notegenerator
+pml reload object nozzleorientationgenerator
+pml reload object sheetgenerator
+pml reload object textwriter
+pml reload object viewannotation
+pml reload object viewconfig
+pml reload object xmlgenerator
+pml reload form !!LayoutToolMain
+-- Done. Now close and reopen the LayoutTool form (or reselect Size).

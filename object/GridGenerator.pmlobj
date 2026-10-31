@@ -1,0 +1,593 @@
+﻿-- ============================================================================
+-- GridGenerator.pmlobj
+-- 图面表格生成器：支吊架表 / 管线表 / 仪表点位表 / 管口方位表
+--
+-- 【本次移植说明】
+--   本文件原为未完成的空壳：`define method .()` 方法名非法、`do` 缺 `enddo`、
+--   结尾 `endmethods` 拼写错误，且全文件无任何调用点（但已在 pml.index 注册，
+--   属"一旦被编译即报错"的隐患）。本次**整体重写**，对象名保持 GridGenerator 不变，
+--   以免影响 pml.index 与既有引用。
+--
+-- 【移植来源】老版 E:\DeepSeek\WorkSpace\PipeLayout\pipelayout.pmlfrm
+--   suppgrid          5311-5334   取数 + 建图层（支架表）
+--   gridsuppapply     5493-5554   支架表绘制（2 列：序号 / 支架名，行高 6mm，字高 2.5mm）
+--   pipegrid          5336-5362   取数 + 建图层（管线表）
+--   gridpipeapply     5556-5640   管线表绘制（3 列：序号 / 管线号 / BOP，行高 6mm，字高 2.5mm）
+--   minstgrid         5642-5666   取数 + 建图层（仪表表）
+--   gridinstapply     5668-5748   仪表表绘制（3 列：序号 / 位号 / EL，行高 10mm，字高 5mm）
+--   mnozzlegrid       5364-5390   取数 + 建图层（管口表）
+--   gridnozzleapply   5392-5491   管口表绘制（4 列：序号 / 管口名 / 描述 / 角度，行高 10mm，字高 5mm）
+--
+-- 【刻意保留（保证移植后外观与既有图纸一致）】
+--   列中心 X、列宽、行高、字高、首行落在 y = 行高 处的留白、
+--   矩形用 `Origin Centre Offset`、文字用 `Origin Offset` + `JUST Centre`、
+--   表体由一段空白 VNOTE 承载、各图元用相对偏移定位 —— 全部与老版逐一对应。
+--
+-- 【刻意修正（相对老版的改动，详见 PORTING_LOG.md 第 1、2 节）】
+--   1. 四张表的图层名各不相同。老版 mnozzlegrid(5379) 与 minstgrid(5656) 都写成
+--      `-pipegrid`，与 pipegrid(5351) 共抢同一图层：先出的表会被后出的表
+--      "删图层重建"连内容一起删掉（或删除失败后两张表叠在一层互相覆盖）。
+--   2. 列定义数据驱动（MakeColumn + TableConfig），消除老版 4 个方法各约 60 行的复制粘贴
+--      ——老版复制粘贴已导致上下方位阈值互换等缺陷。
+--   3. 文本统一做单引号转义（老版只对管线名做了），因为文本要嵌进 `BTEX '...'`。
+--   4. 空表 / 无视图 / 当前元素不是 VIEW 时返回状态码，由表单给出提示，
+--      而不是像老版那样静默什么都不做（老版会先建好空图层再返回）。
+--   5. 列宽统一带单位（老版首列写 `XLEN 20`，无单位，与其余 `20mm` 风格不一致）。
+-- ============================================================================
+define object GridGenerator
+	-- 目标 VIEW（必须）
+	member	.view			is	dbref
+	-- 'SUPP' | 'PIPE' | 'INST' | 'NOZZ'
+	member	.kind			is	string
+	-- 表格数据（二维：每行是一维数组）
+	member	.rows			is	array
+	-- 表格原点，DRAFT 的 XYPS 字符串，如 'X 30 mm Y 50 mm'
+	member	.originXYPS		is	string
+	-- 图层名；不设置时按 kind 自动生成（现在用来命名 NOTE 容器）
+	member	.layerName		is	string
+	-- 容器 NOTE 的绝对路径（由 NoteGenerate 填写；DrawTable 直接复用它建子图元）
+	member	.notePath		is	string
+	--【2026-10-31】表格要挂在这个父元素下（按用户要求改成 SHEE 层级）；空 = 保持旧行为
+	member	.parentSlab		is	dbref
+	member	.noteSlab		is	dbref
+	--【本次新增】表头各列文字（1 个元素 = 1 列）。不设置表示该表不出表头行
+	member	.headers		is	array
+	--【本次修改·按你的要求】表头/标题字体号默认 2；正文字体号见 .bodyFont（默认 1 = 保持原样）
+	member	.headerFont	is	real
+	--【本次修改】正文字体号（默认 1 = 原来的 FONT 1，未改动）；表头/标题字体见 .headerFont
+	member	.bodyFont	is	real
+	--【本次新增】表头字高比正文多多少 mm（默认 1 → 2.5 变 3.5mm）
+	member	.headerHeightExtra	is	real
+	--【本次新增·按你的要求】管口表第 4 列的模式（'HORIZONTAL' = 标高 / 其它 = 方位角）：
+	--   只影响 NOZZ 表的表头文字，与 GridDataGet 的同名成员由调用方一起设置。
+	--【报错修复】(2,759) 同 GridDataGet：23.81 只加了注释、漏了这条成员声明，现在补上。
+	member	.nozzOrie	is	string
+	-- 以下由 TableConfig 按 kind 自动填写，调用方一般不必设置
+	-- 行高 mm
+	member	.rowHeight		is	real
+	-- 字高 mm
+	member	.textHeight		is	real
+	-- 列定义，每列 = [1]列中心X(mm) [2]列宽(mm) [3]取第几列数据
+	member	.columns		is	array
+endobject
+------------------------------------------------------------------------------
+-- 主入口：生成指定类型的表格，返回状态码
+--   'OK'     成功
+--   'NOVIEW' 未设置 view，或 view 不是 VIEW
+--   'EMPTY'  数据为空（不建图层、不画图）
+--   'BADKIND' 未知的表格类型
+define method .Generate(!kind is string) is string
+	!this.kind = !kind
+	-- 参数校验：必须有有效视图
+	if(!this.view.unset())then
+		return 'NOVIEW'
+	endif
+	if(!this.view.type ne 'VIEW')then
+		return 'NOVIEW'
+	endif
+	-- 参数校验：必须有数据行
+	if(!this.rows.unset())then
+		!this.rows = object array()
+	endif
+	if(!this.rows.size() lt 1)then
+		return 'EMPTY'
+	endif
+	-- 表格原点未设置时用与老版相同的默认值，避免 XYPS 收到空串
+	-- 【注意】分成两层判断，不依赖 and/or 的短路行为（值为 unset 时取 .length() 会报错）
+	!originBad = false
+	if(!this.originXYPS.unset())then
+		!originBad = true
+	elseif(!this.originXYPS.length() lt 1)then
+		!originBad = true
+	endif
+	if(!originBad)then
+		!this.originXYPS = 'X 30 mm Y 50 mm'
+	endif
+	-- 按类型配置行高/字高/列定义
+	!bool = !this.TableConfig()
+	if(!bool.not())then
+		return 'BADKIND'
+	endif
+	-- 容器名：未显式指定时按类型生成（四张表各不相同）
+	-- 【本次修改】名字沿用原来的图层名（`<视图名>-suppgrid` 等），但现在用它命名 **NOTE**
+	if(!this.layerName.unset())then
+		!this.layerName = !this.LayerNameForKind()
+	endif
+	--【本次修改·按你的要求】建 NOTE 容器（原来建 LAYER + 其下再建 VNOTE），存在则先删后建
+	--
+	-- 【为什么这里包 handle(2,779)、而且**不再** return】上一版这里抓到 (2,779) 就
+	-- `return 'BADMODULE'` 直接退出，结果实测：NOTE 建好了、方法也执行了，但因为
+	-- NoteGenerate 内部某条属性命令抛了 (2,779)，就被误判成"模块是旧的"，
+	-- **DrawTable() 根本没跑** → NOTE 里什么都没有。现在改成"只警告、继续画表"：
+	-- 容器有了、内容照建，绝不因为一条属性问题把整张表丢掉。
+	!noteWarn = false
+	!this.NoteGenerate(!this.layerName)
+	handle(2,779)
+		!noteWarn = true
+	endhandle
+	if(!noteWarn)then
+		$p WARNING: NoteGenerate raised (2,779). NOTE may be fine; table will still be drawn.
+	endif
+	-- 画表格（内容直接建在该 NOTE 之下）
+	!this.DrawTable()
+	return 'OK'
+endmethod
+------------------------------------------------------------------------------
+-- 按表格类型配置几何参数与列定义
+-- 数值全部取自老版对应方法，切勿随意改动，否则出图外观会与既有图纸不一致
+-- 返回 false 表示 kind 非法
+define method .TableConfig() is boolean
+	!kind = !this.kind
+	!cols = object array()
+	--【本次修改】表头文字（按你的要求：管线表 No./Pipeline/Elevation，支架表 No./Support/Elevation，
+	--   管口表 No./Nozzle/Description/Angle）
+	--   只有设置了 .headers 的表才会画表头行；仪表表(INST)也已补表头（No./Instrument/Elevation）
+	!hdrs = object array()
+	if(!kind eq 'SUPP')then
+		-- 老版 gridsuppapply 5493-5554
+		!this.rowHeight		= 6
+		!this.textHeight	= 2.5
+		!cols.append(!this.MakeColumn(  0, 20, 1))		$* 序号
+		!cols.append(!this.MakeColumn( 40, 60, 2))		$* 支架名
+		--【本次新增】第 3 列：标高(m)
+		-- 列定义是"列中心 X + 列宽"（MakeColumn 里用 Origin Centre Offset 画矩形）：
+		--   第 1 列 中心 0  宽 20 → 跨 -10 … 10
+		--   第 2 列 中心 40 宽 60 → 跨  10 … 70   （与第 1 列正好相接）
+		-- 【修正】第 3 列原来写 105 → 跨 82.5 … 127.5，与第 2 列右边缘(70)之间
+		--   空出 12.5mm（你实测到的那个间距）。现改为**紧接第 2 列**：
+		--   中心 = 70 + 45/2 = 92.5 → 跨 70 … 115，与老版"列列相接"的排法一致。
+		!cols.append(!this.MakeColumn(92.5, 45, 3))
+		-- 表头（3 列，与上面列定义一一对应）
+		!hdrs.append('No.')
+		!hdrs.append('Support')
+		!hdrs.append('Elevation')
+	elseif(!kind eq 'PIPE')then
+		-- 老版 gridpipeapply 5556-5640
+		!this.rowHeight		= 6
+		!this.textHeight	= 2.5
+		!cols.append(!this.MakeColumn(  0,  20, 1))		$* 序号
+		!cols.append(!this.MakeColumn( 50,  80, 2))		$* 管线号
+		!cols.append(!this.MakeColumn(120,  60, 3))		$* BOP 标高
+		-- 表头（3 列，与上面列定义一一对应）
+		!hdrs.append('No.')
+		!hdrs.append('Pipeline')
+		!hdrs.append('Elevation')
+	elseif(!kind eq 'EQUI')then
+		--【本次新增·按你的要求】设备表（EquiLayout）：名称 / 描述 / 标高
+		!this.rowHeight		= 6
+		!this.textHeight	= 2.5
+		--【本次修改·按你的要求】列宽收窄（原 100/110/60 → 60/70/35，总宽 290 → 165mm）
+		!cols.append(!this.MakeColumn( 30,  60, 1))		$* 名称
+		!cols.append(!this.MakeColumn( 95,  70, 2))		$* 描述
+		!cols.append(!this.MakeColumn(147.5, 35, 3))		$* 标高
+		-- 表头（3 列，与上面列定义一一对应）
+		!hdrs.append('Name')
+		!hdrs.append('Description')
+		!hdrs.append('Elevation')
+	elseif(!kind eq 'INST')then
+		-- 老版 gridinstapply 5668-5748
+		!this.rowHeight		= 10
+		!this.textHeight	= 5
+		!cols.append(!this.MakeColumn(  0,  20, 1))		$* 序号
+		!cols.append(!this.MakeColumn( 60, 100, 2))		$* 位号
+		!cols.append(!this.MakeColumn(150,  80, 3))		$* 标高
+		--【本次新增·按你的要求】仪表点位图要出仪表表 → 补表头（与其它表同一写法）
+		!hdrs.append('No.')
+		!hdrs.append('Instrument')
+		!hdrs.append('Elevation')
+	elseif(!kind eq 'NOZZ')then
+		-- 老版 gridnozzleapply 5392-5491
+		!this.rowHeight		= 10
+		!this.textHeight	= 5
+		!cols.append(!this.MakeColumn(  0,  20, 1))		$* 序号
+		!cols.append(!this.MakeColumn( 35,  50, 2))		$* 管口名
+		!cols.append(!this.MakeColumn(110, 100, 3))		$* 描述
+		!cols.append(!this.MakeColumn(185,  50, 4))		$* 方位角
+		--【本次新增·按你的要求】表头（4 列，与上面列定义一一对应，设置方式与 SUPP/PIPE 完全一致）
+		--   字高 = 正文字高(5mm) + .headerHeightExtra(默认 1) = 6mm；字体取 .headerFont(默认 2)
+		--   各列文字按 6mm 字高估算宽度：No.≈11 / Nozzle≈22 / Description≈40 / Angle≈18 mm，
+		--   对应列宽 20 / 50 / 100 / 50 mm，均能容纳，不会互相压字。
+		!hdrs.append('No.')
+		!hdrs.append('Nozzle')
+		!hdrs.append('Description')
+		--【本次新增·按你的要求】卧式那套表里第 4 列是**管口标高**，表头跟着变：
+		--   老版卧式的 nozzlelist 第 4 列就是 pos.wrt(equi).up（标高），不是方位角。
+		if(!this.nozzOrie eq 'HORIZONTAL')then
+			!hdrs.append('Elevation')
+		else
+			!hdrs.append('Angle')
+		endif
+	else
+		return false
+	endif
+	!this.columns = !cols
+	--【本次新增】表头：SUPP / PIPE / INST / NOZZ 均设了文字 → 会画表头行
+	if(!hdrs.size() gt 0)then
+		!this.headers = !hdrs
+	endif
+	return true
+endmethod
+------------------------------------------------------------------------------
+-- 生成一个"列定义"数组
+-- 【注意】每次调用都新建数组，避免 PML 数组引用语义导致的别名问题
+-- （老版把临时数组建在循环外反复 append，见 PORTING_LOG.md 第 9 节的风险项）
+define method .MakeColumn(!x is real,!xlen is real,!key is real) is array
+	!col = object array()
+	!col[1] = !x
+	!col[2] = !xlen
+	!col[3] = !key
+	return !col
+endmethod
+------------------------------------------------------------------------------
+-- 按表格类型返回图层名
+-- 老版缺陷：管口表与仪表表都用了 `-pipegrid`，此处改为各自独立
+define method .LayerNameForKind() is string
+	!viewName = !this.view.name
+	!kind = !this.kind
+	if(!kind eq 'SUPP')then
+		return !viewName + '-suppgrid'
+	elseif(!kind eq 'PIPE')then
+		return !viewName + '-pipegrid'
+	elseif(!kind eq 'INST')then
+		return !viewName + '-instgrid'
+	elseif(!kind eq 'NOZZ')then
+		return !viewName + '-nozzlegrid'
+	else
+		return !viewName + '-grid'
+	endif
+endmethod
+------------------------------------------------------------------------------
+-- 文本转义：把单引号替换成双引号
+-- 原因：表格文本要嵌进 `BTEX '...'`，元素名/描述里若含单引号会破坏命令串解析。
+-- 老版只对管线名做了这一步（gridpipeapply 5577-5581），新版对所有列统一做。
+define method .EscapeText(!s is string) is string
+	if(!s.unset())then
+		return ''
+	endif
+	if(!s.match(|'|) gt 0)then
+		return !s.replace(|'|,|"|)
+	else
+		return !s
+	endif
+endmethod
+------------------------------------------------------------------------------
+--【本次修改·按你的要求】建"表格容器" NOTE（原来这里是建 LAYER + 其下再建 VNOTE）
+--
+-- 关键点：**名字与原来完全一样**，只是把 `NEW LAYER` 换成 `NEW NOTE`。
+--   · Draft 里 NOTE 与 VIEW 是同级、都挂在 SHEET 下（AVEVA 自己的
+--     drafilterlayers.pmlfnc 注释：`-- NOTEs do not live under a view`），
+--     而原来那个 LAYER 的名字里带 '/'，PML 按路径解析后落在
+--     `/HXX_20260910/S/V-suppgrid`（= SHEET 下）—— 换成 NOTE 落在同一处，表格位置不变。
+--   · 名字补成**绝对路径**（只在缺前导 '/' 时补一个，避免拼出 `//HXX...`）再建，避免相对解析的歧义。
+--   · NOTE 自己那段属性命令**已整段删除**（实测在你这套环境里会抛 (2,779)，且对表格外观无影响），
+--     详见方法内注释与 PORTING_LOG 23.23。
+--   · 写法上刻意只用**本模块里已验证过**的语句（`'/' + !name`、`$!var` 代入、
+--     `handle(41,12)` + `$!name` + `delete`、`$p`），不再用 `split`／`[$!x.size()]`
+--     ／`matchwild` 这些本文件从没用过的写法 —— 上一次那版写完，
+--     加载后报 `Method <GRIDGENERATOR>.NOTEGENERATE(<STRING>) not found`，
+--     原因就是模块**只编译了一半**（见 PORTING_LOG 23.19）。
+--   · 同名元素已存在时先删后建：第二次跑时它是 NOTE，老版本留下的是 LAYER，
+--     用 `!!ce.type` 判断后删对应类型 —— 重复出表不叠加、也不留旧图元。
+define method .NoteGenerate(!name is string)
+	--【本次修正】名字可能**已经带前导 '/'**（本工程 `view.name` 就是 '/HXX_20260910/S/V'），
+	--   上一版无条件在前面再加一个 '/'，实测打印出 `//HXX_20260910/S/V-suppgrid` 双斜杠。
+	--   这里按 LimitsNoteGenerator 里已经用过的写法：只在缺的时候补一个。
+	!notePath = !name
+	!hasSlash = false
+	if(!notePath.before('/') eq '')then
+		!hasSlash = true
+	endif
+	if(!hasSlash.not())then
+		!notePath = '/' + !notePath
+	endif
+	--【本次修正】把最终路径存进成员 .notePath —— 让 DrawTable 用**同一个**字符串去导航，
+	--   两边各自拼一次太容易拼出不一样的结果（上一轮 DrawTable 那边无条件加 '/'，
+	--   而 layerName 本身已带前导 '/'，于是导航用了 `//HXX...` → (2,109) Undefined name）。
+	--【2026-10-31】指定了父元素（SHEE）就先切过去，表格就会建在它下面，
+	--   而不是挂在视图下（视图重画/清理时才不会被连带删掉）。
+	!parentOk = false
+	if(!this.parentSlab.unset().not())then
+		$!this.parentSlab
+		!parentOk = true
+	endif
+	!this.notePath = !notePath
+	NEW NOTE $!notePath
+	handle(41,12)
+		!back = !!ce
+		$!notePath
+		!oldType = !!ce.type
+		if(!oldType.match(|NOTE|) gt 0)then
+			delete NOTE
+		elseif(!oldType.match(|LAYE|) gt 0)then
+			delete LAYE
+		endif
+		$!back
+		NEW NOTE $!notePath
+	endhandle
+	--【本次删除·关键】原来这里有一整段 NOTE 属性（JUST/ALIGN/FONT/CHEI/CSPA/LSPA/BLNK/
+	--   BMAR/TXCOLO/NLSTYL/NLCOLO/FSTYLE/FCOLOUR/MSTYLE/MCOLOUR，抄自 AVEVA 图框 NOTE）。
+	--   实测它们**在你这套环境里会抛 (2,779)**：当时正是靠紧邻的 $p 打印把范围缩到这一段的，
+	--   而 $p 之后到方法结束之间只剩这段属性命令 —— 说明其中某条对 NOTE 不适用。
+	--   这些属性本来就是"给子图元的默认值"，而表格每个单元格都自己显式指定了
+	--   （RECTANGLE 给 NLSTYL/NLCOLO/FSTYLE/FCOLOUR，TEXTPRIMITIVE 给 FONT/CHEI/
+	--    CSPA/LSPA/JUST/ALIGN/TXCOLO），所以整段删掉**不影响外观**，也不再有这个隐患。
+	--   如果以后确实需要 NOTE 级别的默认值，请逐条加、每加一条测一次（并包 handle）。
+	!this.noteSlab = !!ce
+endmethod
+------------------------------------------------------------------------------
+-- 绘制表格本体
+-- 结构（**本次已按你的反馈改过**）：
+--   1) 容器是 Generate() → NoteGenerate() 建好的 NOTE（注意：Draft 里 NOTE 与 VIEW 同级，
+--      都挂在 SHEET 下，不能建在 VIEW 里面）；
+--   2) 每个单元格图元创建**之前**都先 `$!notePath` 显式导航回 NOTE，再 `NEW RECTANGLE`
+--      / `NEW TEXTPRIMITIVE` —— 父级一定是 NOTE，不依赖 `END`/`NEW` 的隐含行为；
+--      （上一版用 `END` 回退，你实测 NOTE 是空的 —— 说明 `END` 之后当前元素没回到 NOTE。
+--        另外 Explorer 里看不到内容也印证了这一点，见 PORTING_LOG 23.21 / 23.22。）
+--   3) **坐标用绝对图纸坐标**：NOTE 固定在 (0,0)，单元格坐标 = 表格原点 + 单元格偏移。
+--      这是 AVEVA 标题栏 NOTE 的做法（MdsAbaTitleBlock.pmlfnc 68-87 行：`NEW NOTE` 之后
+--      逐个 `NEW TEXP` + `AT X .. Y ..` 给绝对坐标），也让"NOTE 子图元坐标是相对还是绝对"
+--      这个歧义彻底消失（NOTE 在 0,0 时两种解释等价）；
+--   4) **行方向：从上往下**（第 1 行紧接原点下方，行号越大越靠下）—— 按你的要求改的：
+--      原点是表格的**上边缘**，配合 form 里"表格原点默认放在图幅上方"使用。
+--      老版是反的（`!recty = 0 + !num * 6`，从原点往上长、表放在图下方），见 PORTING_LOG 23.10。
+--   5) 文字 y 与所在行的相对关系不变：文字原点 = 行矩形中心 − 行高/2
+--      （老版 `-2 + num*6`、`-5 + num*10`，本版对 10mm 行高与老版完全一致）。
+-- 2026-09 实测通过（诊断数据见 PORTING_LOG 23.26：PIPE 表 144 矩形 + 144 文字，
+-- 最后一个单元格的父级就是对应的 NOTE），原来的临时诊断打印已按约定删除。
+define method .DrawTable()
+	!view	= !this.view
+	!rows	= !this.rows
+	!cols	= !this.columns
+	!rowH	= !this.rowHeight
+	!chei	= !this.textHeight
+	!origin	= !this.originXYPS
+	--【本次修正·按你的报错】(2,441) Unable to convert string '1050 mm Y 781 mm' to a number
+	--   原因：`.after('X ')` 取到的是后面的**整段** `'1050 mm Y 781 mm'`，
+	--   而 PML 的 `.real()` 要求整个字符串就是一个数字/量纲（`'1189.00mm'.real()` ✔），
+	--   后面还跟着 `Y 781 mm` 这种尾巴就转不了 —— 这也正是本插件里到处写
+	--   `.string('D3').before('mm')`（先切掉非数字部分、再转）的原因。
+	--   修法：`.after('X ')` 之后再 `.before(' ')` 切到第一个空格，得到纯数字：
+	--     'X 1050 mm Y 781 mm' → after('X ')='1050 mm Y 781 mm' → before(' ')='1050' ✔
+	--   两种常见写法都能解析：
+	--     'X 1050 mm Y 781 mm' → '1050'      'X 1050mm Y 781mm' → '1050mm'（'.real()' 认量纲 ✔）
+	!sx	= !origin.after('X ')
+	!sy	= !origin.after('Y ')
+	!sx	= !sx.before(' ')
+	!sy	= !sy.before(' ')
+	!ox	= !sx.real()
+	!oy	= !sy.real()
+	handle any
+		-- 解析失败（例如输入框被改成非法字符串）→ 退回图纸原点，至少画得出来
+		!ox = 0
+		!oy = 0
+	endhandle
+	--【本次修改·按你的反馈】NOTE 的子图元要用**绝对图纸坐标**定位，而不是"相对 NOTE 的偏移"。
+	--   依据是 AVEVA 自己的标题栏代码 MdsAbaTitleBlock.pmlfnc（supports/draft/functions）：
+	--     · 68-77 行：`NEW NOTE` + `NAME $!name/TitleNOTE` —— NOTE 本身**不定位**；
+	--     · 79-87 行：紧接着一个个 `NEW TEXP` + `AT X $!wnote[1] Y $!wnote[2]`，给的是绝对坐标；
+	--   也就是说 NOTE 在这里只当"内容归属的容器"，每个子图元自带绝对坐标。
+	--   该文件 63 行还留着 AVEVA 自己的踩坑注释，正好是我们要的问题：
+	--     `-- Fix the ERROR -- (41,8) Cannot create a NOTE, TEXP elements etc... at this level`
+	--   → 所以这里把 NOTE 固定在 (0,0)，单元格坐标一律用"表格原点 + 单元格偏移"的绝对值。
+	--   附带好处：无论 Draft 把 NOTE 子图元的坐标解释成"相对 NOTE"还是"绝对图纸"，
+	--   NOTE 在 (0,0) 时两种解释完全等价，不会再出现"东西不知道跑哪去了"的情况。
+	--【本次修正·按你的报错】(2,109) Undefined name //HXX_20260910/S/V-suppgrid
+	--   这里是 `'/' + !this.layerName` 无条件加斜杠，而 layerName 本身已带前导 '/'，
+	--   于是拼出双斜杠、导航失败。改成**直接复用 NoteGenerate 存好的 .notePath**，
+	--   两边不再各拼一次（这是上一轮双斜杠问题的同类残留）。
+	!notePath = !this.notePath
+	if(!notePath.unset())then
+		-- 兜底：万一 .notePath 没被写过（例如调用方绕过 NoteGenerate），按容器名补绝对路径
+		!notePath = !this.layerName
+		!hasSlash = false
+		if(!notePath.before('/') eq '')then
+			!hasSlash = true
+		endif
+		if(!hasSlash.not())then
+			!notePath = '/' + !notePath
+		endif
+	endif
+	-- NOTE 定位到 (0,0)：内容自带绝对坐标，NOTE 的位置只是个名义锚点
+	--【2026-10-31】优先用 NoteGenerate 记下的 dbref，避开相对路径在不同 CE 下解析不一致的问题
+	!noteOk = false
+	if(!this.noteSlab.unset().not())then
+		$!this.noteSlab
+		!noteOk = true
+	endif
+	if(!noteOk)then
+		$!notePath
+	endif
+	XYPS X 0mm Y 0mm
+	--【本次新增·按你的要求】画表这段也带**进度条 + 标题**（与标注流程一致）：
+	--   标题就是 `!!fmsys.SETPROGRESSTEXT(<英文>)` 那一行；
+	--   百分比按行更新，画完置 0（与 LabelGenerator 各段结尾写法一致）。
+	--   标题用英文：中文在进度栏会时而乱码（PORTING_LOG 23.20 的结论）。
+	!title = 'Drawing table ...'
+	if(!this.kind eq 'SUPP')then
+		!title = 'Drawing support table (SUPP) ...'
+	elseif(!this.kind eq 'PIPE')then
+		!title = 'Drawing pipe table (PIPE) ...'
+	elseif(!this.kind eq 'INST')then
+		!title = 'Drawing instrument table (INST) ...'
+	elseif(!this.kind eq 'NOZZ')then
+		!title = 'Drawing nozzle table (NOZZ) ...'
+	endif
+	!!fmsys.SETPROGRESSTEXT(!title)
+	!!fmsys.SETPROGRESS(0)
+	--【本次新增·按你的要求】表头行：设了 .headers 的表，把它当成"第一行"插到数据行前面。
+	--   这样单元格的绘制代码完全不用改（表头和普通行一样是"一行数组"），只是数据源多一行。
+	--【报错修复·关键】(23.33) 这里原来是 `if(!this.headers.unset())then` —— **极性反了**：
+	--   `.unset()` 为真表示"没设值"，所以那句话的意思是"表头【没】设时才插入"，
+	--   于是设了表头的 SUPP/PIPE 反而不插表头（数据行照画 → 表现就是"看不到标题栏"），
+	--   而没设表头的 INST/NOZZ 会插进一个空值。改成 `.unset().not()`（= 设了才插入）。
+	!drawRows = object array()
+	if(!this.headers.unset().not())then
+		!drawRows.append(!this.headers)
+	endif
+	do !r0 indices !rows
+		!drawRows.append(!rows[$!r0])
+	enddo
+	!rowTotal = !drawRows.size()
+	--【本次删除】表头定位用的临时诊断（`Table draw rows and header cells:` + rowTotal + hdrCount）
+	--   已按约定删除：你已确认表头正常出现（PORTING_LOG 23.30~23.33）。
+	--【本次修改·按你的要求】表头(标题)行的字体与字高（正文用 .bodyFont（默认 1）+ 原字高，标题用下面两个值）：
+	--   .headerFont       表头/标题字体号，默认 2（按你的要求；原来是 11）
+	--   .headerHeightExtra 表头字高比正文多多少 mm，默认 1（SUPP/PIPE：2.5 → 3.5mm）
+	--【本次修改】正文字体号：默认 1（保持原来的样子，成员 .bodyFont 可覆盖）
+	!bodyFont = !this.bodyFont
+	if(!bodyFont.unset())then
+		!bodyFont = 1
+	endif
+	!hdrFont = !this.headerFont
+	if(!hdrFont.unset())then
+		!hdrFont = 2
+	endif
+	!hdrExtra = !this.headerHeightExtra
+	if(!hdrExtra.unset())then
+		!hdrExtra = 1
+	endif
+	!hasHeader = false
+	if(!this.headers.unset().not())then
+		!hasHeader = true
+	endif
+	-- 逐行逐列绘制
+	do !r indices !drawRows
+		--【本次新增】进度条：按行更新百分比
+		!percent = !r / !rowTotal * 100
+		!!fmsys.SETPROGRESS(!percent)
+		-- 【本次修正·配合表头】行位置改为"从原点开始向下排"：
+		--   第 1 行（有表头时就是表头行）的**上边缘正好压在表格原点上**，
+		--   之后每一行紧接上一行。旧公式是 `- !r * !rowH`（行中心），
+		--   会让首行上边缘比原点低半个行高（原来那半个行高是留给"空白表头位"的），
+		--   现在既然真的画表头，就改成从原点起算、行行相接：
+		--     第 r 行上边缘 y = -(!r - 1) * 行高
+		--     第 r 行中心   y = 上边缘 - 行高/2
+		!rowIndex = !r - 1
+		!rowTopY  = - (!rowIndex * !rowH)
+		!recty	= !rowTopY - (!rowH / 2)
+		!texty	= !recty - (!rowH / 2)		$* 文字与行的相对关系保持不变
+		--【本次新增·按你的要求】表头行用加粗黑体 + 大一号（正文不变）：
+		--   有表头时，第 1 行就是表头行 → 字体用 .headerFont、字高 = 正文 + .headerHeightExtra；
+	--   其余行保持原样（.bodyFont（默认 1）+ 正文字高）。
+		!cellFont = !bodyFont
+		!cellChei = !chei
+		if(!hasHeader)then
+			if(!r eq 1)then
+				!cellFont = !hdrFont
+				!cellChei = !chei + !hdrExtra
+			endif
+		endif
+		do !c indices !cols
+			!cx		= !cols[$!c][1]
+			!xlen	= !cols[$!c][2]
+			!key	= !cols[$!c][3]
+			-- 取单元格文本；该行没有这一列时留空，避免数组越界
+			!value	= ''
+			if(!drawRows[$!r].size() ge !key)then
+				!value = !this.EscapeText(!drawRows[$!r][$!key])
+			endif
+			-- 单元格的**绝对图纸坐标** = 表格原点 + 单元格偏移
+			!absX	= !ox + !cx
+			!absY	= !oy + !recty
+			!absTY	= !oy + !texty
+			-- 单元格外框（先回 NOTE，再建，保证父级就是 NOTE）
+			$!notePath
+			NEW RECTANGLE
+			Origin Centre Offset X $!absX mm Y $!absY mm
+			XLEN $!xlen mm
+			YLEN $!rowH mm
+			NLSTYL Solid
+			NLCOLO 1
+			FSTYLE Off
+			FCOLOUR 10
+			-- 单元格文字
+			--【本次新增·按你的要求】表头行用**加粗黑体 + 大一号**：
+	--   · 字体号取成员 .headerFont（默认 2 —— 按你的要求；原来是 FONT 11），
+	--     本次按你的要求把标题字体号设为 2）；正文用 .bodyFont（默认 1，未改动）；
+			--   · 字高 = 正文字高 + 成员 .headerHeightExtra（默认 1mm，即 2.5 → 3.5mm）；
+			--   · 这两项都可用成员单独覆盖，不确定你们字体号时改 .headerFont 即可。
+			$!notePath
+			NEW TEXTPRIMITIVE
+			Origin Offset X $!absX mm Y $!absTY mm
+			FONT $!cellFont
+			CHEI $!cellChei mm
+			CSPA 0
+			LSPA 0
+			JUST Centre
+			ALIGN Bbody
+			--【23.157 修改·按你的反馈】改用对象接口写入（命令行代入会被管线名里的引号截断）
+			!this.SetCellText(!value)
+			TXCOLO 10
+		enddo
+	enddo
+	--【本次新增】画完把进度条归零（与 LabelGenerator 各段结尾一致）
+	!!fmsys.SETPROGRESS(0)
+	--【本次删除】这里原来有 8 行临时诊断打印（当前元素 / NOTE 路径 / 原点 / 解析出的
+	--   originX、originY / 矩形数 / 文字数 / 最后一个单元格的父级）。
+	--   你实测已通过，诊断数据记录如下（PORTING_LOG 23.26），确认无误后按约定删除：
+	--     note path            = /HXX_20260910/S/V-pipegrid
+	--     origin / originX/Y   = 'X 30 mm Y 781 mm' → 30 / 781
+	--     rect count / text    = 144 / 144（= 48 行 × 3 列）
+	--     parent of last cell  = /HXX_20260910/S/V-pipegrid  ← 图元确实是 NOTE 的子节点 ✔
+endmethod
+------------------------------------------------------------------------------
+-- 兼容保留：单独画一行"文字 + 外框"（老版 GridGenerator 里同名的未完成方法）
+-- 保留此方法是为了不删掉原作者的设计意图；正式表格请使用 Generate()
+define method .GenerateNewRow(!xOffset is real,!yOffset is real,!message is string)
+	!length = !message.length
+	NEW TEXTPRIMITIVE
+	Origin Offset X $!xOffset Y $!yOffset
+	FONT 1
+	CHEI 2.5mm
+	CSPA 0
+	LSPA 0
+	JUST Centre
+	ALIGN Hbody
+	--【23.157 修改·同上】
+	!this.SetCellText(!message)
+	TXCOLO 1
+	NEW RECTANGLE
+	Origin Centre Offset X $!xOffset Y $!yOffset
+	XLEN $!length
+	YLEN 4
+	NLSTYL Solid
+	NLCOLO 1
+	FSTYLE Off
+	FCOLOUR 1
+endmethod
+------------------------------------------------------------------------------
+--------------------------------------------------------------------------------------
+--【23.157 新增·按你的反馈】把文字写进"当前图元"（!!ce，表格里的 TEXTPRIMITIVE）—— **安全版**。
+--   背景与 DimensionGenerator.SetSlabText 同一个问题：`BTEX '$!value'` 是把文本**代入命令行再解析**，
+--   表格第 2 列是管线名（本项目形如 1/2'SSH900-7X0101-…，含英寸单引号），代入后把 PML 字符串截断，
+--   报 `(47,50) CP: Meaningless symbol(s) in command line`。
+--   依据：AVEVA 自己的 design\objects\pipespooldwg.pmlobj:968 `!!ce.btext = !tableData[!j][!i]`、
+--         draft\objects\pipetappingdrwg.pmlobj:496 `!!ce.btex = !viewTitle` 都是对象接口赋值。
+--   两个访问器都试（`.btex` / `.btext`），任一成功即返回；都不行才退回命令形式。
+--   文字里的 `#/`（换行）不受影响 —— 换行是值层约定，AVEVA 在属性赋值里同样放 `#/`。
+define method .SetCellText(!mess is string)
+	--【23.162 薄壳】实现已收敛到 TextWriter.WriteNote（全插件唯一一份三级兜底）。
+	--   保留本方法名：调用点一处都不用改。
+	!writer = object TextWriter()
+	!writer.WriteNote(!mess)
+	endmethod

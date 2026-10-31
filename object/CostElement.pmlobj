@@ -1,0 +1,8 @@
+﻿define object CostElement
+	--用来计算损失函数
+	member		.cost	is	real
+	member		.x		is	real
+	member		.y		is	real
+	
+endobject
+---------------------------------------------------------------------------

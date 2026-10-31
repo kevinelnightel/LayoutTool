@@ -1,0 +1,152 @@
+﻿define object LimitDbelementGet
+	member .view is dbref
+endobject
+--------------------------------------------------------------------------------------
+define method .GetVolume() is volume
+	--获取当前View的范围，基于插件生成的View会有六个面，直接拿上下两个切面的基点就可以得到范围了
+	!view = !this.view
+	!viewMembers = !view.members
+	do !ptrViewMembers indices !viewMembers
+		if(!viewMembers[$!ptrViewMembers].type eq 'VSEC' and !viewMembers[$!ptrViewMembers].name.matchwild('*UP'))then
+			!limitsPositionTo = !viewMembers[$!ptrViewMembers].Plrf.pos.wrt(world)
+		elseif(!viewMembers[$!ptrViewMembers].type eq 'VSEC' and !viewMembers[$!ptrViewMembers].name.matchwild('*DOWN'))then
+			!limitsPositionFrom = !viewMembers[$!ptrViewMembers].Plrf.pos.wrt(world)
+		endif
+	enddo
+	!volume = object volume(!limitsPositionFrom,!limitsPositionTo)
+	return !volume
+endmethod
+--------------------------------------------------------------------------------------
+--获取drawlist里在范围内的指定的类型的对象
+define method .GetDrawListElement(!type is string) is array
+	!view = !this.view
+	!result = object array()
+	!collect = object collect()
+	!collect.volume = !this.GetVolume()
+	!collect.types = !type
+	!volueDbelementList = !!collect(!collect)
+	
+	--获取范围内的所有指定类型对象
+	!addeCollection = object collection()
+	!remeCollection = object collection()
+	!addeCollection.addtype(!type)
+	!remeCollection.addtype(!type)
+	
+	!nRemeMembers = 0
+	!drawListMembers = !view.Idlname.members
+	do !ptrDrawListMembers indices !drawListMembers
+		if(!drawListMembers[$!ptrDrawListMembers].type eq 'ADDE')then
+			!addeCollection.addscope(!drawListMembers[$!ptrDrawListMembers].Idname)
+		elseif(!drawListMembers[$!ptrDrawListMembers].type eq 'REME')then
+			!nRemeMembers = !nRemeMembers + 1
+			!remeCollection.addscope(!drawListMembers[$!ptrDrawListMembers].Idname)
+		endif
+	enddo
+	
+	!addeList = !addeCollection.results()
+	!remeList = !remeCollection.results()
+	
+	do !ptrRemeList indices !remeList
+		!i = !addeList.FindFirst(!remeList[$!ptrRemeList])
+		if(!i.unset().not())then
+			!addeList.DeleteFrom(!i,1)
+		endif
+	enddo
+	!addeList.Compress()
+	
+	do !ptrVolueDbelementList indices !volueDbelementList
+		!j = !addeList.FindFirst(!volueDbelementList[$!ptrVolueDbelementList])
+		if(!j.unset().not())then
+			!result.append(!addeList[$!j])
+		endif
+	enddo
+	!result.unique()
+	
+	--【E3D 兼容·2026-09-14】E3D 下 `collection.results()` 与 `!!collect()` 的元素表示不一致，
+	--  上面的求交会全部落空（图面正常、但标注/尺寸/表格全空）。此时若视图范围内确有该类型元素，
+	--  就直接用这些元素。若 DrawList 带 REME 排除项则打印提示（排除项不生效，宁可多标不漏标）。
+	!nMatched = !result.size()
+	!nVolume = !volueDbelementList.size()
+	if(!nMatched lt 1 and !nVolume gt 0)then
+		if(!nRemeMembers gt 0)then
+			$p DrawList/volume intersection empty - using view-volume elements (REME exclusions NOT applied):
+			$p $!type
+		endif
+		!result = object array()
+		do !ptrVolue indices !volueDbelementList
+			!result.append(!volueDbelementList[$!ptrVolue])
+		enddo
+		!result.unique()
+	endif
+	return !result	
+endmethod
+--------------------------------------------------------------------------------------
+--用来判断某点是否在某范围内
+define method .IsPointWithinLimit(!point is position,!volume is volume) is boolean
+	!px = !point.east
+	!py = !point.north
+	!pz = !point.up
+	!cx = !volume.box().position.east
+	!cy = !volume.box().position.north
+	!cz = !volume.box().position.up
+	!hx = !volume.box().XLENGTH / 2
+	!hy = !volume.box().YLENGTH / 2
+	!hz = !volume.box().ZLENGTH / 2
+	!bool = abs(!px - !cx) le !hx and abs(!py - !cy) le !hy and abs(!pz - !cz) le !hz
+	return !bool
+endmethod
+--------------------------------------------------------------------------------------
+--用来判断某线段是否与当前范围相交
+define method .IsLineIntersectLimit(!pointA is position,!pointB is position,!volume is volume) is boolean
+	!boolA = !this.IsPointWithinLimit(!pointA,!volume)
+	!boolB = !this.IsPointWithinLimit(!pointB,!volume)
+	!bool = !boolA ne !boolB
+	return !bool
+endmethod
+--------------------------------------------------------------------------------------
+--【本次新增·按你的要求】"视图范围内的设备"——**全插件唯一口径**：
+--   · 取 DrawList 里的 EQUI（GetDrawListElement('EQUI')）；
+--   · 位置一律用 **.pos.wrt(world)** 再与视图范围比。
+--   【为什么要有这个】23.99 之前四个地方各自实现，坐标口径还不一致：
+--     尺寸标注 DimensionGenerator.GetEquipment() 用 .pos（**局部**坐标）、
+--     设备名标注 LabelGenerator（EQUI 类别）用 .pos.wrt(world)、
+--     中心线 NoteGenerator 用 .pos、设备表 GridDataGet.GetEquiRows 用 .pos。
+--   设备若挂在非世界原点的层级下，两种口径结果不同 → 出现
+--   "某台设备有名称标注、却没有尺寸标注"这种自相矛盾的现象。
+--   现在统一走这里，四处不会再分叉。
+define method .GetEquiInView() is array
+	!list = !this.GetDrawListElement('EQUI')
+	!volume = !this.GetVolume()
+	!keep = object array()
+	do !i indices !list
+		!point = !list[$!i].pos.wrt(world)
+		!inside = !this.IsPointWithinLimit(!point,!volume)
+		if(!inside)then
+			!keep.append(!list[$!i])
+		endif
+	enddo
+	return !keep
+endmethod
+--------------------------------------------------------------------------------------
+--【本次新增·按你的要求】"视图范围内的仪表"——仪表点位图（InstLayout）用。
+--   口径：先按 DrawList 取（GetDrawListElement('INST')，与其它标注同一套）；
+--   若 DrawList 里一台仪表都没有（很多项目的 AddList 只放了区域/管线，仪表挂在别处），
+--   退化为"整个视图范围里的 INST"（object collect + volume），并打印一行提示。
+--   为什么要有这个兜底：没有它时"图面无仪表标注 + 仪表表 0 行"会同时出现，
+--   用户看到的就是"仪表点位图里没有仪表"。
+define method .GetInstInView() is array
+	!list = !this.GetDrawListElement('INST')
+	if(!list.size() gt 0)then
+		return !list
+	endif
+	!collect = object collect()
+	!collect.volume = !this.GetVolume()
+	!collect.types = 'INST'
+	!list = !!collect(!collect)
+	!list.unique()
+	!nFallback = !list.size()
+	$p Instrument fallback - DrawList has no INST, using all INST inside the view =
+	$p $!nFallback
+	return !list
+endmethod
+--------------------------------------------------------------------------------------

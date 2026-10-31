@@ -1,0 +1,365 @@
+﻿-- ============================================================================
+-- DrawingExporter.pmlobj
+-- 图纸批量导出器（DXF / DWG）
+--
+-- 【本次移植说明】新版 LayoutTool 原先没有任何导出能力。
+--   老版在 "Export Draw" 页提供：把 DRAWING 下的 SHEET 收进列表 → 配置 Draft 的
+--   导出选项（dlicon 图标 + 30 余项 switch）→ 逐张 LIEXEC 导出。
+--   本对象把这套流程搬过来，并把"收表/清表/导出"从表单里分离出来。
+--
+-- 【移植来源】老版 E:\DeepSeek\WorkSpace\PipeLayout\pipelayout.pmlfrm
+--   madddraw      5889-5897   收集当前 DRAWING 下的所有 SHEET（列表去重）
+--   mcleardraw    5903-5908   删除列表选中项
+--   mexport       5910-5934   逐张导出主流程
+--   drawingset    5936-5981   导出选项配置（dlicon /pipelayout_set + switch 集 + block/LAYER 规则）
+--
+-- 【刻意保留】
+--   · 导出选项的 30 余项 `switch` 取值、`block all …`、`LAYER all PIPE, 'PipeLayer'`
+--     **逐行照抄**（这些是 Draft 版本/项目相关的既有约定，不宜擅自改动）；
+--   · `LIEXEC` 的两行续行写法（行尾 `$`）也照抄——原作者环境里能跑通的写法不动它；
+--   · 配置图标名默认仍为 `pipelayout_set`（可用成员 .configName 覆盖）。
+--
+-- 【刻意修正（相对老版，详见 PORTING_LOG.md 第 11 节）】
+--   1. **文件名生成**：老版 `!sheetname.replace('/','.')` 会把全限定名最前面的 `/`
+--      也换成 `.`，生成形如 `.SITE.DRWG.SHEET.dxf` 的文件名（Windows 下是隐藏文件）；
+--      且 `!newsheetname` 只在"名字里含 /"时才赋值，否则是未定义变量直接参与拼接。
+--      本对象改为：先去掉前导 `/`，再把其余 `/` 换成 `_`，且始终赋值。
+--   2. 老版对格式只判断 DXF/DWG 两个分支、**没有 else**，选项不匹配时
+--      `!fileoption/!filetype/!filesuffix` 全是未定义变量就拼进 LIEXEC。
+--      本对象改为参数校验后返回状态码。
+--   3. 老版 `mcleardraw` 用 `!draws[$!selection].delete()`（对字符串元素调 delete，
+--      被 handle any 吞掉 → 删不掉），且无选中校验。本对象用 DeleteFrom + 下标校验。
+--   4. 老版 `madddraw` 的 `coll all sheet for ce` 无 handle，CE 停在非 DRAWING 上会抛未捕获错误；
+--      本对象先校验 CE 类型。
+--   5. 导出结果按张统计成功/失败，返回汇总状态码（老版无任何反馈）。
+-- ============================================================================
+define object DrawingExporter
+	-- 待导出的 SHEET 全名(flnn)列表
+	member	.sheets		is	array
+	-- 'DXF' | 'DWG'
+	member	.format		is	string
+	-- 输出目录
+	member	.savePath	is	string
+	-- 导出选项图标名；默认 'pipelayout_set'
+	member	.configName	is	string
+	-- 输出：成功张数
+	member	.okCount	is	real
+	-- 输出：失败张数
+	member	.failCount	is	real
+	-- 2026-10-31: DXF 导出成功后自动清洗（去 WIPEOUT / 3D 厚度，补包围盒 / VIEWRES）。
+	-- 清洗器：mac\dxf_fix.bat + dxf_fix.py；要停用就把 dxf_fix.bat 改名即可
+endobject
+-- 收集要批量导出的 SHEE（老版 madddraw 对应实现）
+--   【规则·按你的要求】判断当前层级：
+--     · 当前元素是 DPET / REGI / DRWG / SHEE  → **直接在这一层收 SHEE**
+--       （SHEE 本身就用它自己；DPET/REGI/DRWG 收它下面的所有 SHEE）；
+--     · 其它层级（VIEW、VIEW 里的注记/图层…）→ **向上走**，直到遇到上面四种之一再收；
+--     · 走到顶还没遇到 → 返回空数组，表单给提示。
+--   【本次修正之一】上一版是"先向上找 DRWG"：从 REGI 往上永远找不到 DRWG，所以选 REGI 收不到。
+--   【本次修正之二】coll 原来用 `for $!ceName`（名字字符串）——你环境里名字取值有各种坑（曾见 (2,109)
+--     Undefined name //… ），静默失败后被我那句 handle 吞掉，表现就是"什么都没收到"。
+--     改成 `for $!scope`（元素本身，和本插件别处 coll 的写法一致）。
+define method .CollectSheets() is array
+	!result = object array()
+	!ce = !!ce
+	if(!ce.unset())then
+		return !result
+	endif
+	-- ① 当前层级判断 / 向上找到四种可用层级之一
+	!scope = !ce
+	!found = false
+	do !step from 1 to 10
+		!t = !scope.type
+		if(!t eq 'DPET')then
+			!found = true
+			break
+		endif
+		if(!t eq 'REGI')then
+			!found = true
+			break
+		endif
+		if(!t eq 'DRWG')then
+			!found = true
+			break
+		endif
+		if(!t eq 'SHEE')then
+			!found = true
+			break
+		endif
+		if(!t eq 'SHEET')then
+			!found = true
+			break
+		endif
+		!scope = !scope.owner
+		if(!scope.unset())then
+			break
+		endif
+	enddo
+	if(!found.not())then
+		return !result
+	endif
+	-- ② SHEE 本身：就是这一张
+	if(!scope.type eq 'SHEE')then
+		!result.append(!scope.flnn)
+		return !result
+	endif
+	-- ③ DPET / REGI / DRWG：收它下面的所有 SHEE
+	--   【实测结论·2026-09-14 你在 REGI 上验证】类型名必须写 **sheet**：
+	--       coll all drwg  for <REGI> = 7 、coll all sheet for <REGI> = 7 、
+	--       coll all shee  for <REGI> = 0   ← 写成 4 字符类型名 shee 一张都收不到
+	--   （老版 madddraw 原文用的就是 coll all sheet；前面几版我擅自改成 shee，所以一直收 0。）
+	!collOk = true
+	var !sheets coll all sheet for $!scope
+	handle any
+		!collOk = false
+	endhandle
+	if(!collOk)then
+		do !i indices !sheets
+			!result.append(!sheets[$!i].dbref().flnn)
+		enddo
+	endif
+	return !result
+endmethod
+------------------------------------------------------------------------------
+-- 把一张 SHEET 的全名转成合法文件名（对应老版 mexport 5925-5928）
+-- 老版：!sheetname.replace('/','.') → 前导 '/' 也变成 '.'，生成 .SITE.DRWG.SHEET 这种隐藏文件名；
+--       而且 !newsheetname 只在名字含 '/' 时才赋值，否则是未定义变量。
+-- 本版：先去前导 '/'，再把其余 '/' 换成 '_'（例如 SITE_DRWG_SHEET）。
+define method .FileNameFor(!sheetFlnn is string) is string
+	!name = !sheetFlnn
+	if(!name.unset())then
+		return ''
+	endif
+	!name = !name.replace('/','_')
+	-- 去掉替换后残留的前导 '_'
+	if(!name.before('_') eq '')then
+		!name = !name.after('_')
+	endif
+	return !name
+endmethod
+------------------------------------------------------------------------------
+-- 配置导出选项（对应老版 drawingset 5936-5981）
+-- 【注意】这一段是 Draft 的"导出配置图标"编辑会话：`dlicon <图标名>` 打开，
+-- 中间是 switch / block / LAYER 设置，最后 `exit` 关闭。
+-- 取值全部照抄老版，未做任何"优化"；换 Draft 版本或换项目标准时，改这里即可。
+define method .SetExportOptions()
+	!configName = !this.configName
+	if(!configName.unset())then
+		!configName = 'pipelayout_set'
+	endif
+	dlicon /$!configName
+	switch USELAYERRULES 'ON'
+	switch LAYERDEFAA 'PipeLayer|Yellow,CONTINUOUS'
+	switch PrimitiveThickness 'ON'
+	switch ViewNumberPrefix 'ON'
+	switch LayerZone 'ON'
+	switch LayerSite 'ON'
+	switch LayerBack 'ON'
+	switch LayerOlay 'ON'
+	switch LayerNote 'ON'
+	switch LayerLaye 'ON'
+	switch FontMapping 'ON'
+	switch LinetypeMapping 'ON'
+	switch ColourMapping 'ON'
+	switch IncludeZCoordinates 'OFF'
+	switch GraphicsOnlyDXF 'OFF'
+	switch EntityAcDbMarkers 'ON'
+	switch NestedBlocks 'ON'
+	switch BlockBack 'ON'
+	switch BlockOlay 'ON'
+	switch BlockSymb 'ON'
+	switch BlockFill 'ON'
+	switch BlockGraphicFile 'ON'
+	switch GroupDims 'ON'
+	switch GroupNote 'ON'
+	switch GroupVnot 'ON'
+	switch GroupFrame 'ON'
+	switch GroupGlab 'ON'
+	switch GroupSlab 'ON'
+	switch GroupBlocks 'OFF'
+	switch FontFilePath 'OFF'
+	switch IncludeDXFHeaderEntities 'OFF'
+	switch HeaderFileName '%PDMSEXE%/draft_dxf_li.dxf'
+	switch OutputFileName '%PDMSUSER%/output.dxf'
+	switch IgnoreBlockRules 'OFF'
+	switch IgnoreOODErrs 'OFF'
+	switch ScaleFactor '1.0'
+	block all hvac, include name
+	block all rest, include name
+	block all pipe, include name
+	block all equi, include name
+	block all stru, include name
+	LAYER all PIPE, 'PipeLayer'
+	exit
+endmethod
+------------------------------------------------------------------------------
+-- 导出单张图纸（抽成独立方法，便于用 handle 精确兜底）
+-- 返回 true=成功
+define method .ExportOne(!sheetName is string,!filePath is string,!fileoption is string,!filetype is string) is boolean
+	!configName = !this.configName
+	if(!configName.unset())then
+		!configName = 'pipelayout_set'
+	endif
+	--【本次修正·导出报 FAILED 的原因】导航到该 SHEET：
+	--   老版 mexport 是 `/$!draws[$!seldraws]` —— 因为老版列表里存的是**相对当前元素的名字**；
+	--   我们列表里存的是 .flnn（**绝对路径，自带前导 /**），再补一个 / 就变成
+	--   //0300-PIPELATOUT/001/S → (2,109) Undefined name → 每张都失败 → 汇总成 FAILED。
+	--   这里按"是否已带前导 /"决定要不要补，两种取值都能导航。
+	--【23.160 修正·handle 后置绑定】原来把导航命令写在 if/else 两个分支里、handle 挂在
+	--   endif 后面 —— 按 PML 语义 handle 只绑定"紧邻它前面那一条命令"，挂在 endif 后面
+	--   等于这条兜底从来没生效（导航失败不会走 return false，而是整段抛错）。
+	--   现在把导航整块抽成 .NavigateToSheet()（整块 = 一次调用），handle 紧跟这次调用。
+	!navi = !this.NavigateToSheet(!sheetName)
+	handle any
+		!navi = false
+	endhandle
+	if(!navi.not())then
+		$p Export - cannot navigate to sheet:
+		$p $!sheetName
+		return false
+	endif
+	!ok = true
+	LIEXEC $!fileoption '$!filetype' CONFIGDATA '$!configName' $
+		OUTPUTFILENAME '$!filePath'
+	handle any
+		!ok = false
+	endhandle
+	return !ok
+endmethod
+------------------------------------------------------------------------------
+--【23.160 新增】导航到指定的 SHEET。
+--   为什么单独抽一个方法：PML 的 handle 只兜住"紧邻它前面那一条命令"，
+--   而 if/else 里的两条导航命令 + 一个 endif 之后挂 handle 是兜不住的。
+--   抽成方法之后，调用方拿到的就是**一次调用**，handle 挂在它后面即可。
+--   前导斜杠：.before('/') 为空的含义是"字符串以 / 开头"，
+--   以 / 开头的直接用（.flnn 自带前导 / 再补就成 //名字 → (2,109)），
+--   不以 / 开头的才补一个。
+--   返回 true = 导航成功；失败时由调用方的 handle 捕获（本方法内不再兜）。
+define method .NavigateToSheet(!sheetName is string) is boolean
+	!path = !sheetName
+	if(!path.before('/') ne '')then
+		!path = '/' + !path
+	endif
+	$!path
+	return true
+endmethod
+------------------------------------------------------------------------------
+-- 主入口：批量导出
+--   'OK'        全部成功
+--   'PARTIAL'   部分成功（详见 .okCount / .failCount）
+--   'FAILED'    全部失败
+--   'BADOPTIONS' 导出选项配置失败（dlicon/switch 段报错）
+--   'NOSHEETS'  未选择图纸
+--   'NOFORMAT'  格式非法（只支持 DXF / DWG）
+--   'NOPATH'    未填输出目录
+define method .Export() is string
+	-- ---------- 参数校验（老版无任何校验） ----------
+	if(!this.sheets.unset())then
+		return 'NOSHEETS'
+	endif
+	if(!this.sheets.size() lt 1)then
+		return 'NOSHEETS'
+	endif
+	if(!this.format.unset())then
+		return 'NOFORMAT'
+	endif
+	if(!this.format ne 'DXF' and !this.format ne 'DWG')then
+		return 'NOFORMAT'
+	endif
+	if(!this.savePath.unset())then
+		return 'NOPATH'
+	endif
+	if(!this.savePath.length() lt 1)then
+		return 'NOPATH'
+	endif
+	!ce = !!ce
+	-- ---------- 导出选项（老版 drawingset） ----------
+	!optOk = true
+	!this.SetExportOptions()
+	handle any
+		!optOk = false
+	endhandle
+	if(!optOk.not())then
+		$!ce
+		return 'BADOPTIONS'
+	endif
+	-- ---------- 格式参数（老版 5914-5922；补上了 else 分支的等价校验） ----------
+	if(!this.format eq 'DXF')then
+		!fileoption = '/Draft_dxf_LI'
+		!filetype = 'DXFOUT'
+		!suffix = '.dxf'
+	elseif(!this.format eq 'DWG')then
+		!fileoption = '/Draft_dwg_LI'
+		!filetype = 'r18'
+		!suffix = '.dwg'
+	else
+		$!ce
+		return 'NOFORMAT'
+	endif
+	-- ---------- 逐张导出 ----------
+	!okCount = 0
+	!failCount = 0
+	do !i indices !this.sheets
+		!sheetName = !this.sheets[$!i]
+		!fileName = !this.FileNameFor(!sheetName)
+		!filePath = !this.savePath + '/' + !fileName + !suffix
+		!one = !this.ExportOne(!sheetName,!filePath,!fileoption,!filetype)
+		if(!one)then
+			!okCount = !okCount + 1
+			-- 2026-10-31: 导出成功后自动清洗（仅 DXF；DWG 不适用）
+			if(!suffix eq '.dxf')then
+				!this.FixDxf(!filePath)
+			endif
+		else
+			!failCount = !failCount + 1
+		endif
+	enddo
+	!this.okCount = !okCount
+	!this.failCount = !failCount
+	$!ce
+	-- ---------- 汇总 ----------
+	if(!failCount eq 0)then
+		return 'OK'
+	elseif(!okCount eq 0)then
+		return 'FAILED'
+	else
+		return 'PARTIAL'
+	endif
+endmethod
+------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------
+--【2026-10-31 新增】导出后自动清洗 DXF
+--   为何：PDMS 的 DXF 导出没有开关能关掉“文字遮罩(WIPEOUT)”与“图框 3D 厚度”，
+--   也不写 $VIEWRES/$FACETRES 与包围盒 —— 打开就粗一圈、圆不圆、炸开有框。
+--   做法：调 mac\dxf_fix.bat（→ dxf_fix.py，字节级改组码，不动几何与中文）。
+--   停用方式：把 mac\dxf_fix.bat 改名（方法里找不到批处理会静默跳过）
+--   返回 TRUE = 清洗器已执行（明细见 mac\dxf_fix.log）
+define method .FixDxf(!filePath is string) is boolean
+	-- 2026-10-31: 不写任何绝对路径。
+	-- PMLLIB 是分号分隔的根列表，取第一段定位 LayoutTool\mac；
+	-- SYSCOM 命令行不能带 $! 变量（ERRORS E-18），目标路径走请求文件，
+	-- 批处理自己用 %~dp0 找同目录的脚本。
+	var !mls EVAR PMLLIB
+	!root = !mls
+	!semi = !mls.match(';')
+	if (!semi gt 0) then
+		!root = !mls.before(';')
+	endif
+	!req = !root & 'LayoutTool\mac\dxf_fix_req.txt'
+	!ok = true
+	!lines = object ARRAY()
+	!lines.Append(!filePath)
+	!f = object FILE(!req)
+	!f.writeFile('OVERWRITE', !lines)
+	handle any
+		!ok = false
+	endhandle
+	if (!ok) then
+		syscom |cmd /c for /f "tokens=1 delims=;" %i in ("%PMLLIB%") do @call "%i.\LayoutTool\mac\dxf_fix.bat"|
+		handle any
+			!ok = false
+		endhandle
+	endif
+	return !ok
+endmethod

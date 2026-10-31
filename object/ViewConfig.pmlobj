@@ -1,0 +1,33 @@
+﻿define object ViewConfig
+	member		.viewName			is		string
+	member		.viewLimitFrom		is		position
+	member		.viewLimitTo		is		position
+	
+	member		.viewPosition		is		array
+	member		.viewDirection		is		string
+	member		.viewScale			is		real
+	member		.viewType			is		string
+	
+	member		.viewGrid			is		string
+	
+	--【本次新增·按你的要求】每个 ViewConfig 自带一份 DrawList / RemoveList ——
+	--   与 viewLimitFrom/To、viewScale 等一样是"这个视图的独立设置"，
+	--   随 XML 导出/载入，并在点选 viewlist 时自动载入。
+	member		.drawlist			is		array
+	member		.removelist			is		array
+	
+	--【本次新增·按你的要求】该视图的"生成类型"（Drawing Setting 里的 Layout 选项：
+	--   General / PipeLayout / EquiLayout / InstLayout / NozzleLayout(Vertical) /
+	--   NozzleLayout(Horizontal)）。
+	--   【23.79 改名】后两项原名 NozzleOrientation(...)，按你的要求改短成了 NozzleLayout(...)；
+	--   用旧名字存过的视图配置在点选时不会被识别（下拉保持原样），重新选一次再 Save 即可。
+	--   同样属于该视图的独立设置：随 XML 导出/载入，
+	--   并且点选 viewlist 时把 Drawing Setting 里的 Layout 下拉**自动切回**这个值。
+	member		.layoutKind			is		string
+	
+	--【本次新增·按你的要求】该视图的相对标高(mm)：Drawing Setting 里 Relative(mm) 那个框的值。
+	--   与 drawlist / removelist / layoutKind 一样属于该视图的独立设置：
+	--   点选 viewlist 时自动载回，并随 XML 的 <ViewRelativeEL> 导出/载入。
+	member		.relativeElev		is		real
+endobject
+---------------------------------------------------------------------------

@@ -1,0 +1,164 @@
+﻿define object NoteGenerator
+	--用来在draft里生成note
+	member .view is dbref
+	--【本次新增·按你的要求】图纸种类（Drawing Setting 的 Layout 选项）：
+	--   'EquiLayout'（设备布置图）= 这里**只画设备中心线**，不再出那两条带坐标代码的文本；
+	--   设备名标注改由 LabelGenerator 的 EQUI 类别出（SLABEL + SYTM，字号 5mm、文字取 .flnn，
+	--   与其它标注一起走贪心避让）。其余图种仍按老样子出 VNOTE 注释，行为不变。
+	member	.layoutKind		is	string
+endobject
+---------------------------------------------------------------------------
+--生成
+define method .Generate()
+	!view = !this.view
+	--【本次修改·按你的要求】注记图层按图纸种类命名：
+	--   EquiLayout（设备布置图）→ <视图名>-EQUINOTE
+	--   InstLayout（仪表点位图）→ <视图名>-INSTNOTE
+	--   其它图种（管道图等）    → <视图名>-NOTES（老版叫 /<视图名>/NOTES，这里改成与
+	--     -limitsnote / -suppgrid / -northarrow 同一风格的平铺名）
+	!layoutKind = !this.layoutKind
+	if(!layoutKind.unset())then
+		!layoutKind = ''
+	endif
+	!layerName = !view.name + '-NOTES'
+	if(!layoutKind eq 'EquiLayout')then
+		!layerName = !view.name + '-EQUINOTE'
+	elseif(!layoutKind eq 'InstLayout')then
+		!layerName = !view.name + '-INSTNOTE'
+	endif
+	!limitDbelementGet = object LimitDbelementGet()
+	!limitDbelementGet.view = !view
+	!labelGenerator = object LabelGenerator()
+	--【本次修改·按你的要求】改用唯一口径（与尺寸标注/名称标注/设备表同一套）
+	!list = !limitDbelementGet.GetEquiInView()
+	!volume = !limitDbelementGet.GetVolume()
+	!labelGenerator.LayerGenerate(!layerName)
+	do !i indices !list
+		!this.Generatevnote(!volume.from,!volume.to,!list[$!i])
+	enddo
+endmethod
+---------------------------------------------------------------------------
+define method .Generatevnote(!from is position,!to is position,!element is dbref)
+	!type = !element.type
+	--【本次新增·按你的要求】EquiLayout：图面直接标设备名（不再出那两条坐标代码文本）
+	!equiMode = false
+	if(!this.layoutKind eq 'EquiLayout')then
+		!equiMode = true
+	elseif(!this.layoutKind eq 'InstLayout')then
+		--【本次新增·按你的要求】仪表点位图与设备布置图一样：只画中心线，不出坐标代号文本
+		!equiMode = true
+	endif
+	!name = !element.name
+	!flnn = !element.flnn
+	!posCenter = !element.pos.wrt(world)
+	!volume = object volume(!element)
+	!Npos = !volume.to
+	!Npos.east = !posCenter.east
+	!Spos = !volume.from
+	!Spos.east = !posCenter.east
+	!Epos = !volume.to
+	!Epos.north = !posCenter.north
+	!Wpos = !volume.from
+	!Wpos.north = !posCenter.north
+
+	if(!Npos.north gt !to.north)then
+		!Npos.north = !to.north
+	endif
+	if(!Spos.north lt !from.north)then
+		!Spos.north = !from.north
+	endif
+	if(!Epos.east gt !to.east)then
+		!Epos.east = !to.east
+	endif
+	if(!Wpos.east lt !from.east)then
+		!Wpos.east = !from.east
+	endif
+
+	NEW VNOTE 
+	DDNM $!type $!name
+	JUST Left
+	ALIGN Bbody
+	FONT 1
+	BLNK true
+	BMAR 0mm
+	CHEI 2mm
+	CSPA 0
+	LSPA 0
+	TXCOLO 1
+	NLSTYL Chained
+	NLCOLO 2
+	FSTYLE Off
+	FCOLOUR 1
+	MSTYLE Off
+	MCOLOUR 1
+	
+	--两个中心线
+	NEW STRAIGHT
+	Fpt Position $!Npos
+	Tpt Position $!Spos
+	NLSTYL Chained
+	NLCOLO 2
+	NEW STRAIGHT
+	Fpt Position $!Epos
+	Tpt Position $!Wpos
+	NLSTYL Chained
+	NLCOLO 2
+	
+	--【本次新增·按你的要求】EquiLayout 改标设备名，这两条 #POSN/#POSE 文本不画
+	--【2026-10-31·按你的要求】设备名不再写进 V-NOTES（图面那两条 #POSN/#POSE 文本）。
+	--   现在改由 LabelGenerator 生成带引线的设备名标注（单行 "name EL xx.xx m"），
+	--   与管线号/支架/仪表标注一起排布。下面整段注释保留，恢复=去掉行首 '-- '。
+	-- if(!equiMode.not())then
+	-- NEW TEXTPRIMITIVE
+	-- Origin Position $!Wpos
+	-- FONT 1
+	-- CHEI 2mm
+	-- CSPA 0
+	-- LSPA 0
+	-- JUST Right
+	-- ALIGN Bbody
+	--【23.158 修改·按你的要求】改用对象接口写入（设备名里带引号时命令行会被截断）
+	-- !mess = !this.SafeText(!flnn) + ' #POSN<from ' + !this.SafeText(!name) + '>'
+	-- !this.SetTextSafe(!mess)
+	-- TXCOLO 1
+
+	-- NEW TEXTPRIMITIVE
+	-- Origin Position $!Spos
+	-- ADEG 90degree
+	-- FONT 1
+	-- CHEI 2mm
+	-- CSPA 0
+	-- LSPA 0
+	-- JUST Right
+	-- ALIGN Bbody
+	--【23.158 修改·同上】
+	-- !mess = !this.SafeText(!flnn) + ' #POSE<from ' + !this.SafeText(!name) + '>'
+	-- !this.SetTextSafe(!mess)
+	-- TXCOLO 1
+	-- endif
+endmethod
+--------------------------------------------------------------------------------------
+--【23.158 新增·按你的要求】文字安全写入：把文字写进"当前图元"（!!ce，本文件里是 SLABEL /
+--   TEXTPRIMITIVE），**不经过命令行词法分析** —— 文本里带单引号也不会把 PML 字符串截断。
+--   背景：`BTEX '$!note'` 这种写法是"先把变量文本代入这一行，再按 PML 语法解析"，
+--   名字里出现 `'`（英寸口径，如 1/2'SSH900-…）就会报
+--   `(47,50) CP: Meaningless symbol(s) in command line`（详见 PORTING_LOG.md 23.157）。
+--   依据：AVEVA 自己写文字都用对象接口 ——
+--     design\objects\pipespooldwg.pmlobj:968  `!!ce.btext = !tableData[!j][!i]`、
+--     draft\objects\pipetappingdrwg.pmlobj:496 `!!ce.btex = !viewTitle`。
+--   三级兜底：① 对象接口 ② `|...|` 定界命令 ③ 转义（' → "、| → /）后命令形式并打印。
+--   与 DimensionGenerator.SetSlabText / LabelGenerator.SetSlabText / GridGenerator.SetCellText 同一套。
+define method .SetTextSafe(!mess is string)
+	--【23.162 薄壳】实现已收敛到 TextWriter.WriteNote（全插件唯一一份三级兜底）。
+	--   保留本方法名：调用点一处都不用改。
+	!writer = object TextWriter()
+	!writer.WriteNote(!mess)
+	endmethod
+--------------------------------------------------------------------------------------
+--【23.158 新增】取安全字符串：变量可能是 unset（老版命令形式下 unset 会展开成空），
+--   拼接前一律过一遍，避免 `unset + '字符串'` 报错。写法与本工程 GridGenerator.EscapeText 一致。
+define method .SafeText(!s is string) is string
+	--【23.162 薄壳】实现已收敛到 TextWriter.SafeText。
+	!writer = object TextWriter()
+	return !writer.SafeText(!s)
+	endmethod

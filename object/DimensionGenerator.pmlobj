@@ -1,0 +1,2583 @@
+﻿define object DimensionGenerator
+	member .view is dbref
+	member .grid is dbref
+	--【本次新增·按你的要求】进度条用：base = 本阶段起点百分比，span = 本阶段宽度百分比
+	member .progressBase is real
+	member .progressSpan is real
+	--【本次新增·按你的要求】相对标高(mm)：本对象画的两类 EL 标注都要减去它 ——
+	--   设备 EL 标注（GetEquipmentMessage）、管道 BOP EL 标注。
+	--   未设置时按 0 处理（各方法里都有兜底），单独调用也不会报 unset。
+	member .relative is real
+	--【本次新增·按你的要求】输出：本次画出的轴网中心线条数（0 = 没有轴网或都不在视图范围内）
+	member .centrelineCount is real
+	--【本次新增·按你的要求】图纸种类（Drawing Setting 的 Layout 选项）：
+	--   'EquiLayout' = 设备布置图 —— 尺寸标注**只两层**（外=轴网、内=设备），
+	--   不画管道/管嘴那一层；其它取值仍是原来的三层，行为不变。
+	member .layoutKind is string
+	--【23.147 新增·按你的要求】轴网数据模型探测结果（缓存，一张图只探测一次）：
+	--   'E3D'  = 轴网是 GRIDFA（族，GRDAXE 判方向）+ GRIDPL（平面，pos.wrt(world) 取坐标）
+	--   'PDMS' = 轴网是 SCTN（GTYPE 判方向，posstart.wrt(world) 取坐标）
+	member .dataModel is string
+	-- 探测时读到的 banner 原文（保留备查；23.159 起不再自动打印）
+	member .bannerText is string
+	--【23.161 新增】判据来源：'banner' / 'capability-gridfa' / 'capability-sctn' / 'default'
+	--   排障用：轴网表现不对时先看这个值，就知道这次是按什么认的模型（不打印）。
+	member .dataModelSource is string
+endobject
+--------------------------------------------------------------------------------------
+--【本次新增·按你的要求】进度条辅助：把"当前阶段内已完成的比例"换算成总百分比并刷新进度栏。
+--   base / span 由 Generate() 在进入每个阶段前设置；各循环只报自己这一段内的进度。
+--   文案一律用英文：进度栏控件对非 ASCII 显示不稳定（同 23.17 那批改动的理由）。
+define method .ProgressAt(!fraction is real)
+	!!fmsys.SETPROGRESS(!this.progressBase + !fraction * !this.progressSpan)
+endmethod
+--------------------------------------------------------------------------------------
+define method .Generate()
+	--【本次修改·按你的要求】不再用 if(!equiMode.not()) 夹各类尺寸，改成**按图纸种类分派**：
+	--     · Layout = EquiLayout（设备布置图）与 InstLayout（仪表点位图）→ GenerateTwoLayerLayout()：只两层；
+	--     · 其它所有图种（管道平面布置图等）→ GeneratePipeLayout()：三层，与老版一致。
+	--【本次修改·按你的要求】按图纸种类分派：**显式分支**，不再用中间布尔量。
+	--   23.104 那一版我写成了 if(!twoLayer)then → 管道图：PML 里 if(!x) 表示"x 为真"，
+	--   于是 twoLayer=true（Equi/Inst）反而进了管道图分支 → 两种图都出了三层尺寸。
+	--   现在直接按 Layout 值分支，不再有真假反转的可能。
+	!layoutKind = !this.layoutKind
+	if(!layoutKind.unset())then
+		!layoutKind = ''
+	endif
+	if(!layoutKind eq 'EquiLayout')then
+		!this.GenerateTwoLayerLayout()
+	elseif(!layoutKind eq 'InstLayout')then
+		!this.GenerateTwoLayerLayout()
+	else
+		!this.GeneratePipeLayout()
+	endif
+endmethod
+--------------------------------------------------------------------------------------
+-- 管道平面布置图（以及除设备布置图以外的所有图种）：三层尺寸（轴网 + 设备 + 管道/管嘴）
+define method .GeneratePipeLayout()
+	!view	=	!this.view
+	!grid	=	!this.grid
+	!labelGenerator = object LabelGenerator()
+	--获取四周的点
+	--【本次新增·按你的要求】尺寸标注阶段显示进度条（英文文案）。
+	--   进度分配：取数 0→35%（逐项推进）、四个方向 35→95%（GenerateDpoi 里逐点推进）、
+	--   收尾 ChangeLdim/SortLabel 95→100%。
+	!!fmsys.SETPROGRESSTEXT('Generating dimensions ...')
+	!!fmsys.SETPROGRESS(0)
+	!this.progressBase = 0
+	!this.progressSpan = 5
+	--【本次修改·按你的要求】管道平面布置图：外围**三层**（外→内：轴网 / 设备 / 管道·管嘴）
+	--   （上面这两行原来是 EquiLayout 的说明，被一起复制进了本方法，现已改正）
+	!volumePositionArray = !this.GetVolumeMessage()
+	!this.progressBase = 5
+	!this.progressSpan = 5
+	!gridMessageArray = !this.GetGrid()
+	!this.progressBase = 10
+	!this.progressSpan = 5
+	!equipmentMessageArray = !this.GetEquipment()
+	!this.progressBase = 15
+	!this.progressSpan = 5
+	!tubiMessageArray = !this.GetTubiMessage()
+	!this.progressBase = 20
+	!this.progressSpan = 15
+	!pipeMessageArray = !this.GetPipelineIntersection()
+	--【2026-10-31 新增·按你的要求】设备名标注并入管道引线标注：
+	--   用同一个数组、同一个 GenerateSytmNote、同一次排序 → 位置/样式/排序全一致，不另建一套。
+	!equiLabelArray = !this.GetEquipmentLabels()	$*四个方向的设备名消息
+	
+	
+	!viewSizeNorthValue = !view.xypos.north + !view.size[2] / 2
+	!viewSizeSouthValue = !view.xypos.north - !view.size[2] / 2
+	!viewSizeEastValue = !view.xypos.east + !view.size[1] / 2
+	!viewSizeWestValue = !view.xypos.east - !view.size[1] / 2
+	!thirdDimensionNorthValue = !viewSizeNorthValue + 30
+	!thirdDimensionSouthValue = !viewSizeSouthValue - 30
+	!thirdDimensionEastValue = !viewSizeEastValue + 30
+	!thirdDimensionWestValue = !viewSizeWestValue - 30
+	!thirdDimensionNorthString = 'X $!viewSizeEastValue Y $!thirdDimensionNorthValue'
+	!thirdDimensionSouthString = 'X $!viewSizeEastValue Y $!thirdDimensionSouthValue'
+	!thirdDimensionEastString = 'X $!thirdDimensionEastValue Y $!viewSizeNorthValue'
+	!thirdDimensionWestString = 'X $!thirdDimensionWestValue Y $!viewSizeNorthValue'
+	!secondDimensionNorthValue = !viewSizeNorthValue + 20
+	!secondDimensionSouthValue = !viewSizeSouthValue - 20
+	!secondDimensionEastValue = !viewSizeEastValue + 20
+	!secondDimensionWestValue = !viewSizeWestValue - 20
+	!secondDimensionNorthString = 'X $!viewSizeEastValue Y $!secondDimensionNorthValue'
+	!secondDimensionSouthString = 'X $!viewSizeEastValue Y $!secondDimensionSouthValue'
+	!secondDimensionEastString = 'X $!secondDimensionEastValue Y $!viewSizeNorthValue'
+	!secondDimensionWestString = 'X $!secondDimensionWestValue Y $!viewSizeNorthValue'
+	!firstDimensionNorthValue = !viewSizeNorthValue + 10
+	!firstDimensionSouthValue = !viewSizeSouthValue - 10
+	!firstDimensionEastValue = !viewSizeEastValue + 10
+	!firstDimensionWestValue = !viewSizeWestValue - 10
+	!firstDimensionNorthString = 'X $!viewSizeEastValue Y $!firstDimensionNorthValue'
+	!firstDimensionSouthString = 'X $!viewSizeEastValue Y $!firstDimensionSouthValue'
+	!firstDimensionEastString = 'X $!firstDimensionEastValue Y $!viewSizeNorthValue'
+	!firstDimensionWestString = 'X $!firstDimensionWestValue Y $!viewSizeNorthValue'
+	
+	--东侧标注
+	!this.progressBase = 35
+	!this.progressSpan = 15
+	!!fmsys.SETPROGRESSTEXT('Generating dimensions - East ...')
+	!layerName = !view.name + '_Dimensions/East'
+	!labelGenerator.LayerGenerate(!layerName)
+	--【本次修改·按你的要求删掉重复段】
+	--   原来"东侧三层"整段被写了两遍（旧 51-58 行与 59-70 行完全相同）：
+	--   同样设 _Dimensions/East 图层、同样 `!eastDimensionPosition = !volumePositionArray[1]`、
+	--   同样 append 一次 gridMessageArray[1]、同样 `GenerateLDIM('N',!thirdDimensionEastString)`
+	--   + `GenerateDpoi(!eastlist)`。后果是东侧第三层的 **LDIM / DPOI / SYTM 注释全都建两份**，
+	--   并且下面那个"数组引用赋值"会让同一批坐标被重复追加进点集。
+	--   现在只保留一段。
+	--
+	--   【顺带把点集改成显式拷贝】PML 数组是**引用语义**，`!a = !b` 只是起别名：
+	--   老版写 `!eastDimensionPosition = !volumePositionArray[1]` 之后再 append，
+	--   实际上是把后面的坐标一路写回 volumePositionArray[1] 本身（"累加"效果就是这么来的）。
+	--   这里改成拷贝，累加语义不变但不再有隐藏副作用。
+	--   三层的累加顺序（外→内）与老版一致：
+	--     三层 = 范围点 + 轴网点 → 二层 = 再加设备点 → 一层 = 再加管嘴点 + 管道交点
+	!eastDimensionPosition = object array()
+	do !i indices !volumePositionArray[1]
+		!eastDimensionPosition.append(!volumePositionArray[1][$!i])
+	enddo
+	--东侧三层
+	do !i indices !gridMessageArray[1]
+		!eastDimensionPosition.append(!gridMessageArray[1][$!i][3])
+		!this.GenerateGridNote(!gridMessageArray[1][$!i])
+	enddo
+	!this.GenerateLDIM('N',!thirdDimensionEastString)
+	!eastlist = !this.PositionNorthSort(!eastDimensionPosition)
+	!this.GenerateDpoi(!eastlist)
+	--东侧二层
+	do !i indices !equipmentMessageArray[1]
+		!eastDimensionPosition.append(!equipmentMessageArray[1][$!i][1].pos.wrt(world))
+	enddo
+	!this.GenerateLDIM('N',!secondDimensionEastString)
+	!eastlist = !this.PositionNorthSort(!eastDimensionPosition)
+	!this.GenerateDpoi(!eastlist)
+	--东侧一层
+	do !i indices !tubiMessageArray[1]
+		!eastDimensionPosition.append(!tubiMessageArray[1][$!i])
+	enddo
+	do !i indices !pipeMessageArray[1]
+		!eastDimensionPosition.append(!pipeMessageArray[1][$!i][3])
+		!this.GenerateSytmNote(!pipeMessageArray[1][$!i])
+	enddo
+	--【2026-10-31】设备名标注：同一套 GenerateSytmNote 与边上位置，但不进尺寸链
+	do !ei indices !equiLabelArray[1]
+		!this.GenerateSytmNote(!equiLabelArray[1][$!ei])
+	enddo
+
+	!this.GenerateLDIM('N',!firstDimensionEastString)
+	!eastlist = !this.PositionNorthSort(!eastDimensionPosition)
+	!this.GenerateDpoi(!eastlist)
+	
+	--西侧标注
+	!this.progressBase = 50
+	!this.progressSpan = 15
+	!!fmsys.SETPROGRESSTEXT('Generating dimensions - West ...')
+	!layerName = !view.name + '_Dimensions/West'
+	!labelGenerator.LayerGenerate(!layerName)
+	--西侧三层
+	-- 【同东侧】点集改为显式拷贝（不再别名 volumePositionArray[2]），累加顺序不变
+	!westDimensionPosition = object array()
+	do !i indices !volumePositionArray[2]
+		!westDimensionPosition.append(!volumePositionArray[2][$!i])
+	enddo
+	do !i indices !gridMessageArray[2]
+		!westDimensionPosition.append(!gridMessageArray[2][$!i][3])
+		!this.GenerateGridNote(!gridMessageArray[2][$!i])
+	enddo
+	!this.GenerateLDIM('N',!thirdDimensionWestString)
+	!westlist = !this.PositionNorthSort(!westDimensionPosition)
+	!this.GenerateDpoi(!westlist)
+	--西侧二层
+	do !i indices !equipmentMessageArray[2]
+		!westDimensionPosition.append(!equipmentMessageArray[2][$!i][1].pos.wrt(world))
+	enddo
+	!this.GenerateLDIM('N',!secondDimensionWestString)
+	!westlist = !this.PositionNorthSort(!westDimensionPosition)
+	!this.GenerateDpoi(!westlist)
+	--西侧一层
+	do !i indices !tubiMessageArray[2]
+		!westDimensionPosition.append(!tubiMessageArray[2][$!i])
+	enddo
+	do !i indices !pipeMessageArray[2]
+		!westDimensionPosition.append(!pipeMessageArray[2][$!i][3])
+		!this.GenerateSytmNote(!pipeMessageArray[2][$!i])
+	enddo
+	--【2026-10-31】设备名标注：同一套 GenerateSytmNote 与边上位置，但不进尺寸链
+	do !ei indices !equiLabelArray[2]
+		!this.GenerateSytmNote(!equiLabelArray[2][$!ei])
+	enddo
+	!this.GenerateLDIM('N',!firstDimensionWestString)
+	!westlist = !this.PositionNorthSort(!westDimensionPosition)
+	!this.GenerateDpoi(!westlist)
+	
+	--北侧标注
+	!this.progressBase = 65
+	!this.progressSpan = 15
+	!!fmsys.SETPROGRESSTEXT('Generating dimensions - North ...')
+	!layerName = !view.name + '_Dimensions/North'
+	!labelGenerator.LayerGenerate(!layerName)
+	--北侧三层
+	-- 【同东侧】点集改为显式拷贝（不再别名 volumePositionArray[3]），累加顺序不变
+	!northDimensionPosition = object array()
+	do !i indices !volumePositionArray[3]
+		!northDimensionPosition.append(!volumePositionArray[3][$!i])
+	enddo
+	do !i indices !gridMessageArray[3]
+		!northDimensionPosition.append(!gridMessageArray[3][$!i][3])
+		!this.GenerateGridNote(!gridMessageArray[3][$!i])
+	enddo
+	!this.GenerateLDIM('E',!thirdDimensionNorthString)
+	!northlist = !this.PositionEastSort(!northDimensionPosition)
+	!this.GenerateDpoi(!northlist)
+	--北侧二层
+	do !i indices !equipmentMessageArray[3]
+		!northDimensionPosition.append(!equipmentMessageArray[3][$!i][1].pos.wrt(world))
+	enddo
+	!this.GenerateLDIM('E',!secondDimensionNorthString)
+	!northlist = !this.PositionEastSort(!northDimensionPosition)
+	!this.GenerateDpoi(!northlist)
+	--北侧一层
+	do !i indices !tubiMessageArray[3]
+		!northDimensionPosition.append(!tubiMessageArray[3][$!i])
+	enddo
+	do !i indices !pipeMessageArray[3]
+		!northDimensionPosition.append(!pipeMessageArray[3][$!i][3])
+		!this.GenerateSytmNote(!pipeMessageArray[3][$!i])
+	enddo
+	--【2026-10-31】设备名标注：同一套 GenerateSytmNote 与边上位置，但不进尺寸链
+	do !ei indices !equiLabelArray[3]
+		!this.GenerateSytmNote(!equiLabelArray[3][$!ei])
+	enddo
+	!this.GenerateLDIM('E',!firstDimensionNorthString)
+	!northlist = !this.PositionEastSort(!northDimensionPosition)
+	!this.GenerateDpoi(!northlist)
+	
+	--南侧标注
+	!this.progressBase = 80
+	!this.progressSpan = 15
+	!!fmsys.SETPROGRESSTEXT('Generating dimensions - South ...')
+	!layerName = !view.name + '_Dimensions/South'
+	!labelGenerator.LayerGenerate(!layerName)
+	--南侧三层
+	-- 【同东侧】点集改为显式拷贝（不再别名 volumePositionArray[4]），累加顺序不变
+	!southDimensionPosition = object array()
+	do !i indices !volumePositionArray[4]
+		!southDimensionPosition.append(!volumePositionArray[4][$!i])
+	enddo
+	-- 【本次修改·修正下标笔误】原来是 `do !i indices !gridMessageArray[3]`，
+	--   但循环体里取的是 `!gridMessageArray[4][$!i]` —— 循环上界用了北侧([3])、取数用南侧([4])。
+	--   两侧元素个数不同时会"数组越界报错"或"少取/漏取点"，与南侧尺寸链的实际意图不符，故按取数改为 [4]。
+	do !i indices !gridMessageArray[4]
+		!southDimensionPosition.append(!gridMessageArray[4][$!i][3])
+		!this.GenerateGridNote(!gridMessageArray[4][$!i])
+	enddo
+	!this.GenerateLDIM('E',!thirdDimensionsouthString)
+	!southlist = !this.PositionEastSort(!southDimensionPosition)
+	!this.GenerateDpoi(!southlist)
+	--南侧二层
+	do !i indices !equipmentMessageArray[4]
+		!southDimensionPosition.append(!equipmentMessageArray[4][$!i][1].pos.wrt(world))
+	enddo
+	!this.GenerateLDIM('E',!secondDimensionsouthString)
+	!southlist = !this.PositionEastSort(!southDimensionPosition)
+	!this.GenerateDpoi(!southlist)
+	--南侧一层
+	do !i indices !tubiMessageArray[4]
+		!southDimensionPosition.append(!tubiMessageArray[4][$!i])
+	enddo
+	do !i indices !pipeMessageArray[4]
+		!southDimensionPosition.append(!pipeMessageArray[4][$!i][3])
+		!this.GenerateSytmNote(!pipeMessageArray[4][$!i])
+	enddo
+	--【2026-10-31】设备名标注：同一套 GenerateSytmNote 与边上位置，但不进尺寸链
+	do !ei indices !equiLabelArray[4]
+		!this.GenerateSytmNote(!equiLabelArray[4][$!ei])
+	enddo
+	!this.GenerateLDIM('E',!firstDimensionsouthString)
+	!southlist = !this.PositionEastSort(!southDimensionPosition)
+	!this.GenerateDpoi(!southlist)
+	
+	!this.progressBase = 95
+	!this.progressSpan = 5
+	!!fmsys.SETPROGRESSTEXT('Generating dimensions - sorting labels ...')
+	!this.ChangeLdim()
+	!this.SortLabel()
+	--【本次新增·按你的要求】轴网中心线：VIEW 下建 LAYE + VNOTE，用 8004 点划线把每条轴线贯通视图
+	!this.progressBase = 99
+	!!fmsys.SETPROGRESSTEXT('Generating grid centrelines ...')
+	!this.DrawGridCentrelines()
+	!!fmsys.SETPROGRESS(0)
+endmethod
+--【本次修改·按你的要求】设备布置图（EquiLayout）与仪表点位图（InstLayout）**共用**这个方法：
+--   外围只两层（外=轴网、内=设备）—— 两种图纸都不出管道/管嘴那一层。
+define method .GenerateTwoLayerLayout()
+	!view	=	!this.view
+	!grid	=	!this.grid
+	!labelGenerator = object LabelGenerator()
+	--获取四周的点
+	--【本次新增·按你的要求】尺寸标注阶段显示进度条（英文文案）。
+	--   进度分配：取数 0→35%（逐项推进）、四个方向 35→95%（GenerateDpoi 里逐点推进）、
+	--   收尾 ChangeLdim/SortLabel 95→100%。
+	!!fmsys.SETPROGRESSTEXT('Generating dimensions ...')
+	!!fmsys.SETPROGRESS(0)
+	!this.progressBase = 0
+	!this.progressSpan = 5
+	--【本次修改·按你的要求】外围标注**只两层** ——
+	--   最外面一层标**轴网**（与管道布置图同一套口径）；里面一层：
+	--   设备布置图（EquiLayout）标**设备**，仪表点位图（InstLayout）标**仪表（点位）**。
+	!volumePositionArray = !this.GetVolumeMessage()
+	!this.progressBase = 5
+	!this.progressSpan = 5
+	!gridMessageArray = !this.GetGrid()
+	!this.progressBase = 10
+	!this.progressSpan = 5
+	--【本次新增·按你的要求】二层（内层）要素：
+	--   设备布置图（EquiLayout）= **设备**；仪表点位图（InstLayout）= **仪表（点位）**。
+	--   两种图纸共用本方法，只在这里分一次取值，下面四个方向的二层循环写法完全一致。
+	!instLayer = false
+	if(!this.layoutKind eq 'InstLayout')then
+		!instLayer = true
+	endif
+	if(!instLayer)then
+		!secondLayerPositions = !this.GetInstrumentPositions()
+	else
+		!secondLayerPositions = !this.GetEquipmentPositions()
+	endif
+	!this.progressBase = 15
+	!this.progressSpan = 5
+	!tubiMessageArray = !this.GetTubiMessage()
+	!this.progressBase = 20
+	!this.progressSpan = 15
+	!pipeMessageArray = !this.GetPipelineIntersection()
+	
+	
+	!viewSizeNorthValue = !view.xypos.north + !view.size[2] / 2
+	!viewSizeSouthValue = !view.xypos.north - !view.size[2] / 2
+	!viewSizeEastValue = !view.xypos.east + !view.size[1] / 2
+	!viewSizeWestValue = !view.xypos.east - !view.size[1] / 2
+	!thirdDimensionNorthValue = !viewSizeNorthValue + 30
+	!thirdDimensionSouthValue = !viewSizeSouthValue - 30
+	!thirdDimensionEastValue = !viewSizeEastValue + 30
+	!thirdDimensionWestValue = !viewSizeWestValue - 30
+	!thirdDimensionNorthString = 'X $!viewSizeEastValue Y $!thirdDimensionNorthValue'
+	!thirdDimensionSouthString = 'X $!viewSizeEastValue Y $!thirdDimensionSouthValue'
+	!thirdDimensionEastString = 'X $!thirdDimensionEastValue Y $!viewSizeNorthValue'
+	!thirdDimensionWestString = 'X $!thirdDimensionWestValue Y $!viewSizeNorthValue'
+	!secondDimensionNorthValue = !viewSizeNorthValue + 20
+	!secondDimensionSouthValue = !viewSizeSouthValue - 20
+	!secondDimensionEastValue = !viewSizeEastValue + 20
+	!secondDimensionWestValue = !viewSizeWestValue - 20
+	!secondDimensionNorthString = 'X $!viewSizeEastValue Y $!secondDimensionNorthValue'
+	!secondDimensionSouthString = 'X $!viewSizeEastValue Y $!secondDimensionSouthValue'
+	!secondDimensionEastString = 'X $!secondDimensionEastValue Y $!viewSizeNorthValue'
+	!secondDimensionWestString = 'X $!secondDimensionWestValue Y $!viewSizeNorthValue'
+	!firstDimensionNorthValue = !viewSizeNorthValue + 10
+	!firstDimensionSouthValue = !viewSizeSouthValue - 10
+	!firstDimensionEastValue = !viewSizeEastValue + 10
+	!firstDimensionWestValue = !viewSizeWestValue - 10
+	!firstDimensionNorthString = 'X $!viewSizeEastValue Y $!firstDimensionNorthValue'
+	!firstDimensionSouthString = 'X $!viewSizeEastValue Y $!firstDimensionSouthValue'
+	!firstDimensionEastString = 'X $!firstDimensionEastValue Y $!viewSizeNorthValue'
+	!firstDimensionWestString = 'X $!firstDimensionWestValue Y $!viewSizeNorthValue'
+	
+	--东侧标注
+	!this.progressBase = 35
+	!this.progressSpan = 15
+	!!fmsys.SETPROGRESSTEXT('Generating dimensions - East ...')
+	!layerName = !view.name + '_Dimensions/East'
+	!labelGenerator.LayerGenerate(!layerName)
+	--【本次修改·按你的要求删掉重复段】
+	--   原来"东侧三层"整段被写了两遍（旧 51-58 行与 59-70 行完全相同）：
+	--   同样设 _Dimensions/East 图层、同样 `!eastDimensionPosition = !volumePositionArray[1]`、
+	--   同样 append 一次 gridMessageArray[1]、同样 `GenerateLDIM('N',!thirdDimensionEastString)`
+	--   + `GenerateDpoi(!eastlist)`。后果是东侧第三层的 **LDIM / DPOI / SYTM 注释全都建两份**，
+	--   并且下面那个"数组引用赋值"会让同一批坐标被重复追加进点集。
+	--   现在只保留一段。
+	--
+	--   【顺带把点集改成显式拷贝】PML 数组是**引用语义**，`!a = !b` 只是起别名：
+	--   老版写 `!eastDimensionPosition = !volumePositionArray[1]` 之后再 append，
+	--   实际上是把后面的坐标一路写回 volumePositionArray[1] 本身（"累加"效果就是这么来的）。
+	--   这里改成拷贝，累加语义不变但不再有隐藏副作用。
+	--   三层的累加顺序（外→内）与老版一致：
+	--     三层 = 范围点 + 轴网点 → 二层 = 再加设备点 → 一层 = 再加管嘴点 + 管道交点
+	!eastDimensionPosition = object array()
+	do !i indices !volumePositionArray[1]
+		!eastDimensionPosition.append(!volumePositionArray[1][$!i])
+	enddo
+	--东侧三层
+	do !i indices !gridMessageArray[1]
+		!eastDimensionPosition.append(!gridMessageArray[1][$!i][3])
+		!this.GenerateGridNote(!gridMessageArray[1][$!i])
+	enddo
+	!this.GenerateLDIM('N',!thirdDimensionEastString)
+	!eastlist = !this.PositionNorthSort(!eastDimensionPosition)
+	!this.GenerateDpoi(!eastlist)
+	--东侧二层（设备布置图=设备 / 仪表点位图=仪表）
+	do !i indices !secondLayerPositions[1]
+		!eastDimensionPosition.append(!secondLayerPositions[1][$!i])
+	enddo
+	!this.GenerateLDIM('N',!secondDimensionEastString)
+	!eastlist = !this.PositionNorthSort(!eastDimensionPosition)
+	!this.GenerateDpoi(!eastlist)
+	--【本段=一层（管道/管嘴）】设备布置图不出（原 if(!equiMode.not()) 夹子已去掉）
+	
+	--西侧标注
+	!this.progressBase = 50
+	!this.progressSpan = 15
+	!!fmsys.SETPROGRESSTEXT('Generating dimensions - West ...')
+	!layerName = !view.name + '_Dimensions/West'
+	!labelGenerator.LayerGenerate(!layerName)
+	--西侧三层
+	-- 【同东侧】点集改为显式拷贝（不再别名 volumePositionArray[2]），累加顺序不变
+	!westDimensionPosition = object array()
+	do !i indices !volumePositionArray[2]
+		!westDimensionPosition.append(!volumePositionArray[2][$!i])
+	enddo
+	do !i indices !gridMessageArray[2]
+		!westDimensionPosition.append(!gridMessageArray[2][$!i][3])
+		!this.GenerateGridNote(!gridMessageArray[2][$!i])
+	enddo
+	!this.GenerateLDIM('N',!thirdDimensionWestString)
+	!westlist = !this.PositionNorthSort(!westDimensionPosition)
+	!this.GenerateDpoi(!westlist)
+	--西侧二层（设备布置图=设备 / 仪表点位图=仪表）
+	do !i indices !secondLayerPositions[2]
+		!westDimensionPosition.append(!secondLayerPositions[2][$!i])
+	enddo
+	!this.GenerateLDIM('N',!secondDimensionWestString)
+	!westlist = !this.PositionNorthSort(!westDimensionPosition)
+	!this.GenerateDpoi(!westlist)
+	--【本段=一层（管道/管嘴）】设备布置图不出（原 if(!equiMode.not()) 夹子已去掉）
+	
+	--北侧标注
+	!this.progressBase = 65
+	!this.progressSpan = 15
+	!!fmsys.SETPROGRESSTEXT('Generating dimensions - North ...')
+	!layerName = !view.name + '_Dimensions/North'
+	!labelGenerator.LayerGenerate(!layerName)
+	--北侧三层
+	-- 【同东侧】点集改为显式拷贝（不再别名 volumePositionArray[3]），累加顺序不变
+	!northDimensionPosition = object array()
+	do !i indices !volumePositionArray[3]
+		!northDimensionPosition.append(!volumePositionArray[3][$!i])
+	enddo
+	do !i indices !gridMessageArray[3]
+		!northDimensionPosition.append(!gridMessageArray[3][$!i][3])
+		!this.GenerateGridNote(!gridMessageArray[3][$!i])
+	enddo
+	!this.GenerateLDIM('E',!thirdDimensionNorthString)
+	!northlist = !this.PositionEastSort(!northDimensionPosition)
+	!this.GenerateDpoi(!northlist)
+	--北侧二层（设备布置图=设备 / 仪表点位图=仪表）
+	do !i indices !secondLayerPositions[3]
+		!northDimensionPosition.append(!secondLayerPositions[3][$!i])
+	enddo
+	!this.GenerateLDIM('E',!secondDimensionNorthString)
+	!northlist = !this.PositionEastSort(!northDimensionPosition)
+	!this.GenerateDpoi(!northlist)
+	--【本段=一层（管道/管嘴）】设备布置图不出（原 if(!equiMode.not()) 夹子已去掉）
+	
+	--南侧标注
+	!this.progressBase = 80
+	!this.progressSpan = 15
+	!!fmsys.SETPROGRESSTEXT('Generating dimensions - South ...')
+	!layerName = !view.name + '_Dimensions/South'
+	!labelGenerator.LayerGenerate(!layerName)
+	--南侧三层
+	-- 【同东侧】点集改为显式拷贝（不再别名 volumePositionArray[4]），累加顺序不变
+	!southDimensionPosition = object array()
+	do !i indices !volumePositionArray[4]
+		!southDimensionPosition.append(!volumePositionArray[4][$!i])
+	enddo
+	-- 【本次修改·修正下标笔误】原来是 `do !i indices !gridMessageArray[3]`，
+	--   但循环体里取的是 `!gridMessageArray[4][$!i]` —— 循环上界用了北侧([3])、取数用南侧([4])。
+	--   两侧元素个数不同时会"数组越界报错"或"少取/漏取点"，与南侧尺寸链的实际意图不符，故按取数改为 [4]。
+	do !i indices !gridMessageArray[4]
+		!southDimensionPosition.append(!gridMessageArray[4][$!i][3])
+		!this.GenerateGridNote(!gridMessageArray[4][$!i])
+	enddo
+	!this.GenerateLDIM('E',!thirdDimensionsouthString)
+	!southlist = !this.PositionEastSort(!southDimensionPosition)
+	!this.GenerateDpoi(!southlist)
+	--南侧二层（设备布置图=设备 / 仪表点位图=仪表）
+	do !i indices !secondLayerPositions[4]
+		!southDimensionPosition.append(!secondLayerPositions[4][$!i])
+	enddo
+	!this.GenerateLDIM('E',!secondDimensionsouthString)
+	!southlist = !this.PositionEastSort(!southDimensionPosition)
+	!this.GenerateDpoi(!southlist)
+	--【本段=一层（管道/管嘴）】设备布置图不出（原 if(!equiMode.not()) 夹子已去掉）
+	
+	!this.progressBase = 95
+	!this.progressSpan = 5
+	!!fmsys.SETPROGRESSTEXT('Generating dimensions - sorting labels ...')
+	!this.ChangeLdim()
+	!this.SortLabel()
+	--【本次新增·按你的要求】轴网中心线：VIEW 下建 LAYE + VNOTE，用 8004 点划线把每条轴线贯通视图
+	!this.progressBase = 99
+	!!fmsys.SETPROGRESSTEXT('Generating grid centrelines ...')
+	!this.DrawGridCentrelines()
+	!!fmsys.SETPROGRESS(0)
+endmethod
+--------------------------------------------------------------------------------------
+define method .SortLabel()
+	--【本次修正】第 3/4 块（按**东西坐标** [2] 排序、间距也按 [2] 算）的分界原来写的是
+	--   `!slabMessageArray[$!i][2] lt !view.xypos.north` —— 拿 X 去和视图中心的 **north**
+	--   （Y）比较，混了坐标轴，分界点没有实际意义。已改为与东西轴对应的 `!view.xypos.east`。
+	--   前两块（按南北坐标 [3] 排序）用的 `!view.xypos.north` 本来就是对的，未改动。
+	--【报错修复】(2,751) Variable !BASE does not exist —— 四个方向块统一加默认值
+	--   原因：!base 只在下面每个块的"按中间分开"循环里、**且该侧有标签落在视图中心以南时**
+	--         才被赋值（!base = 最后一个位于中心以南的下标）。
+	--         当某一侧的标注全部在视图中心以北（或该侧没有标注）时，!base 从未赋值，
+	--         紧接着的 `do !i from !base to !slabMessageArray.size() - 1` 就报 (2,751)，
+	--         整个尺寸标注流程中断。老插件同款写法，属数据相关的隐藏缺陷（以前没触发到）。
+	--   修法：每个块在"按中间分开"之前先给 !base = 1，语义 = "全部算作北侧" ——
+	--         北侧循环覆盖全部相邻标签对；南侧循环 `do !k from 1 to !base - 1` 自然不执行。
+	--   这属于"条件赋值 + 无条件使用"的通用坑（同类还有 LabelGenerator 的 !percent = 0，见 23.17）。
+	!slabMessage = object array()
+	!slabMessageArray = object array()
+	!view = !this.view
+	-------------------------------------------------------------------
+	!dimensionWest = !view.name + '_Dimensions/West'
+	var !slabs coll all slab for $!dimensionWest
+	do !i indices !slabs
+		!slabMessage[1] = !slabs[$!i].dbref()
+		!slabMessage[2] = !slabs[$!i].dbref().ddnmx
+		!slabMessage[3] = !slabs[$!i].dbref().ddnmy
+		!slabMessage[4] = 0
+		!slabMessage[5] = 0
+		!slabMessageArray.append(!slabMessage)
+	enddo
+	--按照坐标点的南北坐标排序
+	do !i from 1 to !slabMessageArray.size()
+		do !j from 1 to !slabMessageArray.size() - !i
+			!k = !j + 1
+			if(!slabMessageArray[$!j][3] ge !slabMessageArray[$!k][3])then
+				!temp = !slabMessageArray[$!j]
+				!slabMessageArray[$!j] = !slabMessageArray[$!k]
+				!slabMessageArray[$!k] = !temp
+			endif
+		enddo
+	enddo
+	--【报错修复】(2,751) !base 默认值：全部算北侧（详见本方法头注释）
+	!base = 1
+	--按照中间分开
+	do !i indices !slabMessageArray
+		if(!slabMessageArray[$!i][3] lt !view.xypos.north)then
+			!base = !i
+		endif
+	enddo
+	--北侧调整
+	do !i from !base to !slabMessageArray.size() - 1
+		!j = !i + 1
+		!delta = !slabMessageArray[$!j][3] - !slabMessageArray[$!i][3] - !slabMessageArray[$!i][5]
+		--【本次修正·按你的要求】间距门槛 gap 原来只看"被推开的那个标签"(!j)的文字：
+		--   含 '*EL.*' → 7，否则 5。你的要求是：**相邻的另一个标签(!i)也是 '*EL*' 时同样要 7**
+		--   —— 两个 EL 文本挨在一起时，文字更宽/更高，需要同样的间距。
+		--   判断用 elseif 串起来（不写 `or`，避免两个操作数里有一个取不到时报错）。
+		--【23.149 修改·按你的要求】外围避让距离改成按"当前标注 / 前一个标注"的类型查表（见 .LabelGap()）
+		!gap = !this.LabelGap(!slabMessageArray[$!j][1],!slabMessageArray[$!i][1])
+		if(!delta Lt !gap)then
+			!slabMessageArray[$!j][5] = !gap - !delta
+		endif
+	enddo
+	--南侧调整
+	do !k from 1 to !base - 1
+		!i = !base + 1 - !k
+		!j = !i - 1
+		!delta =  !slabMessageArray[$!i][3] + !slabMessageArray[$!i][5] - !slabMessageArray[$!j][3]
+		--【本次修正·按你的要求】同北侧：相邻标签(!i)也含 '*EL.*' 时，gap 同样取 7
+		--【23.149 修改·按你的要求】外围避让距离改成按"当前标注 / 前一个标注"的类型查表（见 .LabelGap()）
+		!gap = !this.LabelGap(!slabMessageArray[$!j][1],!slabMessageArray[$!i][1])
+		if(!delta Lt !gap)then
+			!slabMessageArray[$!j][5] = !delta - !gap
+		endif
+	enddo
+	
+	do !i indices !slabMessageArray
+		!xoff = !slabMessageArray[$!i][1].xypos.east
+		!yoff = !slabMessageArray[$!i][5]
+		!db = !slabMessageArray[$!i][1] 
+		$!db
+		offset x $!xoff y $!yoff
+	enddo
+	-------------------------------------------------------------------
+	!slabMessageArray.clear()
+	!dimensionEast = !view.name + '_Dimensions/East'
+	var !slabs coll all slab for $!dimensionEast
+	do !i indices !slabs
+		!slabMessage[1] = !slabs[$!i].dbref()
+		!slabMessage[2] = !slabs[$!i].dbref().ddnmx
+		!slabMessage[3] = !slabs[$!i].dbref().ddnmy
+		!slabMessage[4] = 0
+		!slabMessage[5] = 0
+		!slabMessageArray.append(!slabMessage)
+	enddo
+	--按照坐标点的南北坐标排序
+	do !i from 1 to !slabMessageArray.size()
+		do !j from 1 to !slabMessageArray.size() - !i
+			!k = !j + 1
+			if(!slabMessageArray[$!j][3] ge !slabMessageArray[$!k][3])then
+				!temp = !slabMessageArray[$!j]
+				!slabMessageArray[$!j] = !slabMessageArray[$!k]
+				!slabMessageArray[$!k] = !temp
+			endif
+		enddo
+	enddo
+	--【报错修复】(2,751) !base 默认值：全部算北侧（详见本方法头注释）
+	!base = 1
+	--按照中间分开
+	do !i indices !slabMessageArray
+		if(!slabMessageArray[$!i][3] lt !view.xypos.north)then
+			!base = !i
+		endif
+	enddo
+	--北侧调整
+	do !i from !base to !slabMessageArray.size() - 1
+		!j = !i + 1
+		!delta = !slabMessageArray[$!j][3] - !slabMessageArray[$!i][3] - !slabMessageArray[$!i][5]
+		--【23.149 修改·按你的要求】外围避让距离改成按"当前标注 / 前一个标注"的类型查表（见 .LabelGap()）
+		!gap = !this.LabelGap(!slabMessageArray[$!j][1],!slabMessageArray[$!i][1])
+		if(!delta Lt !gap)then
+			!slabMessageArray[$!j][5] = !gap - !delta
+		endif
+	enddo
+	--南侧调整
+	do !k from 1 to !base - 1
+		!i = !base + 1 - !k
+		!j = !i - 1
+		!delta =  !slabMessageArray[$!i][3] + !slabMessageArray[$!i][5] - !slabMessageArray[$!j][3]
+		
+		--【23.149 修改·按你的要求】外围避让距离改成按"当前标注 / 前一个标注"的类型查表（见 .LabelGap()）
+		!gap = !this.LabelGap(!slabMessageArray[$!j][1],!slabMessageArray[$!i][1])
+		if(!delta Lt !gap)then
+			!slabMessageArray[$!j][5] = !delta - !gap
+		endif
+	enddo
+	do !i indices !slabMessageArray
+		!xoff = !slabMessageArray[$!i][1].xypos.east
+		!yoff = !slabMessageArray[$!i][5]
+		!db = !slabMessageArray[$!i][1] 
+		$!db
+		offset x $!xoff y $!yoff
+	enddo
+	-------------------------------------------------------------------
+	!slabMessageArray.clear()
+	!dimensionEast = !view.name + '_Dimensions/North'
+	var !slabs coll all slab for $!dimensionEast
+	do !i indices !slabs
+		!slabMessage[1] = !slabs[$!i].dbref()
+		!slabMessage[2] = !slabs[$!i].dbref().ddnmx
+		!slabMessage[3] = !slabs[$!i].dbref().ddnmy
+		!slabMessage[4] = 0
+		!slabMessage[5] = 0
+		!slabMessageArray.append(!slabMessage)
+	enddo
+	--按照坐标点的东西坐标排序
+	do !i from 1 to !slabMessageArray.size()
+		do !j from 1 to !slabMessageArray.size() - !i
+			!k = !j + 1
+			if(!slabMessageArray[$!j][2] ge !slabMessageArray[$!k][2])then
+				!temp = !slabMessageArray[$!j]
+				!slabMessageArray[$!j] = !slabMessageArray[$!k]
+				!slabMessageArray[$!k] = !temp
+			endif
+		enddo
+	enddo
+	--【报错修复】(2,751) !base 默认值：全部算北侧（详见本方法头注释）
+	!base = 1
+	--按照中间分开
+	do !i indices !slabMessageArray
+		if(!slabMessageArray[$!i][2] lt !view.xypos.east)then
+			!base = !i
+		endif
+	enddo
+	--北侧调整
+	do !i from !base to !slabMessageArray.size() - 1
+		!j = !i + 1
+		!delta = !slabMessageArray[$!j][2] - !slabMessageArray[$!i][2] - !slabMessageArray[$!i][4]
+		--【23.149 修改·按你的要求】外围避让距离改成按"当前标注 / 前一个标注"的类型查表（见 .LabelGap()）
+		!gap = !this.LabelGap(!slabMessageArray[$!j][1],!slabMessageArray[$!i][1])
+		if(!delta Lt !gap)then
+			!slabMessageArray[$!j][4] = !gap - !delta
+		endif
+	enddo
+	--南侧调整
+	do !k from 1 to !base - 1
+		!i = !base + 1 - !k
+		!j = !i - 1
+		!delta =  !slabMessageArray[$!i][2] + !slabMessageArray[$!i][4] - !slabMessageArray[$!j][2]
+		
+		--【23.149 修改·按你的要求】外围避让距离改成按"当前标注 / 前一个标注"的类型查表（见 .LabelGap()）
+		!gap = !this.LabelGap(!slabMessageArray[$!j][1],!slabMessageArray[$!i][1])
+		if(!delta Lt !gap)then
+			!slabMessageArray[$!j][4] = !delta - !gap
+		endif
+	enddo
+	do !i indices !slabMessageArray
+		!xoff = !slabMessageArray[$!i][4]
+		!yoff = !slabMessageArray[$!i][1].xypos.north
+		!db = !slabMessageArray[$!i][1] 
+		$!db
+		offset x $!xoff y $!yoff
+	enddo
+	-------------------------------------------------------------------
+	!slabMessageArray.clear()
+	!dimensionEast = !view.name + '_Dimensions/South'
+	var !slabs coll all slab for $!dimensionEast
+	do !i indices !slabs
+		!slabMessage[1] = !slabs[$!i].dbref()
+		!slabMessage[2] = !slabs[$!i].dbref().ddnmx
+		!slabMessage[3] = !slabs[$!i].dbref().ddnmy
+		!slabMessage[4] = 0
+		!slabMessage[5] = 0
+		!slabMessageArray.append(!slabMessage)
+	enddo
+	--按照坐标点的东西坐标排序
+	do !i from 1 to !slabMessageArray.size()
+		do !j from 1 to !slabMessageArray.size() - !i
+			!k = !j + 1
+			if(!slabMessageArray[$!j][2] ge !slabMessageArray[$!k][2])then
+				!temp = !slabMessageArray[$!j]
+				!slabMessageArray[$!j] = !slabMessageArray[$!k]
+				!slabMessageArray[$!k] = !temp
+			endif
+		enddo
+	enddo
+	--【报错修复】(2,751) !base 默认值：全部算北侧（详见本方法头注释）
+	!base = 1
+	--按照中间分开
+	do !i indices !slabMessageArray
+		if(!slabMessageArray[$!i][2] lt !view.xypos.east)then
+			!base = !i
+		endif
+	enddo
+	--北侧调整
+	do !i from !base to !slabMessageArray.size() - 1
+		!j = !i + 1
+		!delta = !slabMessageArray[$!j][2] - !slabMessageArray[$!i][2] - !slabMessageArray[$!i][4]
+		--【23.149 修改·按你的要求】外围避让距离改成按"当前标注 / 前一个标注"的类型查表（见 .LabelGap()）
+		!gap = !this.LabelGap(!slabMessageArray[$!j][1],!slabMessageArray[$!i][1])
+		if(!delta Lt !gap)then
+			!slabMessageArray[$!j][4] = !gap - !delta
+		endif
+	enddo
+	--南侧调整
+	do !k from 1 to !base - 1
+		!i = !base + 1 - !k
+		!j = !i - 1
+		!delta =  !slabMessageArray[$!i][2] + !slabMessageArray[$!i][4] - !slabMessageArray[$!j][2]
+		
+		--【23.149 修改·按你的要求】外围避让距离改成按"当前标注 / 前一个标注"的类型查表（见 .LabelGap()）
+		!gap = !this.LabelGap(!slabMessageArray[$!j][1],!slabMessageArray[$!i][1])
+		if(!delta Lt !gap)then
+			!slabMessageArray[$!j][4] = !delta - !gap
+		endif
+	enddo
+	do !i indices !slabMessageArray
+		!xoff = !slabMessageArray[$!i][4]
+		!yoff = !slabMessageArray[$!i][1].xypos.north
+		!db = !slabMessageArray[$!i][1] 
+		$!db
+		offset x $!xoff y $!yoff
+	enddo
+endmethod
+--------------------------------------------------------------------------------------
+--获取View四周的点，按照东西北南顺序返回
+define method .GetVolumeMessage() is array
+	!view						=	!this.view
+	!limitDbelementGet			=	object LimitDbelementGet()
+	!limitDbelementGet.view		=	!view
+	!volume						=	!limitDbelementGet.GetVolume()
+	!eastList					=	object array()
+	!westList					=	object array()
+	!northList					=	object array()
+	!southList					=	object array()
+	!message					=	object array()
+	!posWestSouth = !volume.from
+	!posEastNorth = !volume.to
+	!posEastSouth = !volume.from
+	!posEastSouth.east = !volume.to.east
+	!posWestNorth = !volume.to
+	!posWestNorth.east = !volume.from.east
+	!eastList.append(!posEastNorth)
+	!eastList.append(!posEastSouth)
+	!westList.append(!posWestNorth)
+	!westList.append(!posWestSouth)
+	!northList.append(!posEastNorth)
+	!northList.append(!posWestNorth)
+	!southList.append(!posEastSouth)
+	!southList.append(!posWestSouth)
+	!message[1] = !eastList
+	!message[2] = !westList
+	!message[3] = !northList
+	!message[4] = !southList
+	return !message
+endmethod
+--------------------------------------------------------------------------------------
+--根据设置好的轴网来计算
+define method .GetGrid() is array
+	--【23.153 新增·按你的要求】**没设 GRID 时只跳过轴网这一层**，不能把整段尺寸/引线标注带断：
+	--   直接返回 4 个空数组（结构与正常返回完全一致），调用方
+	--   `do !i indices !gridMessageArray[n]` 遍历空数组是安全的 → 设备层 / 管道层照常画。
+	--   （轴网中心线那边 DrawGridCentrelines() / .DrawGridCentrelinesE3D() 本来就有
+	--     `!grid.unset()` 的自跳过，不用管。）
+	--   ⚠ 这个判断必须在下面的"版本分派"**之前**：否则 E3D 分支会把整库的 GRIDFA 都收进来
+	--     （那是"设了轴网但轴网底下没有 GRIDFA"时的兜底，不能用来兜"用户根本没设轴网"）。
+	!gridCheck = !this.grid
+	if(!gridCheck.unset())then
+		!emptyEast = object array()
+		!emptyWest = object array()
+		!emptyNorth = object array()
+		!emptySouth = object array()
+		!emptyReturn = object array()
+		!emptyReturn[1] = !emptyEast
+		!emptyReturn[2] = !emptyWest
+		!emptyReturn[3] = !emptyNorth
+		!emptyReturn[4] = !emptySouth
+		return !emptyReturn
+	endif
+	--【23.147 新增·按你的要求】版本判断后分派：E3D 的轴网是 GRIDFA + GRIDPL（老 SCTN 那套收不到），
+	--   走新增的 .GetGridE3D()；PDMS 继续走本方法下面的老代码（老代码一字未动）
+	if(!this.IsE3D())then
+		return !this.GetGridE3D()
+	endif
+	!view					= !this.view
+	!grid					= !this.grid
+	!limitDbelementGet		= object LimitDbelementGet()
+	!limitDbelementGet.view	= !view
+	!volume					= !limitDbelementGet.GetVolume()
+	!gridListX				= object array()
+	!gridListY				= object array()
+	!eastGrid				= object array()
+	!westGrid				= object array()
+	!northGrid				= object array()
+	!southGrid				= object array()
+	!return					= object array()
+	var !xgrid coll all sctn with (matchwild(gtype,|XGRD|)) for $!grid
+	do !ptrXgrid indices !xgrid
+		!xGridPosition = !xgrid[$!ptrXgrid].dbref().posstart.wrt(world)
+		if((!volume.from.east - !xGridPosition.east) * (!volume.to.east - !xGridPosition.east) le 0)then
+			!gridListX.append(!xgrid[$!ptrXgrid].dbref())
+		endif
+	enddo
+	!list = !this.PositionEastSort(!gridListX)
+	--【报错修复】(2,752) Array element 1 does not exist
+	--   原因：本节原来**无条件**取 !list[1]。当视图范围内没有 X 向轴网截断
+	--   （!gridListX 为空）时，!list[1] 就越界报错，整个尺寸标注流程中断。
+	--   修法：先看 !list 有没有元素，没有就跳过这一节（23.159 起不再打印说明）。
+	--   （不是加 handle：这是本方法自己的逻辑漏洞，加 handle 会把"真的取不到轴网"
+	--     也一起吞掉，见 PORTING_LOG 23.17 的判断准则。）
+	--   返回值仍是 4 个数组（此处为空的 southGrid/northGrid），
+	--   调用方 Generate() 用 `do !i indices !gridMessageArray[n]` 遍历空数组是安全的。
+	if(!list.size() gt 0)then
+		!interPosition			= !list[1].pos.wrt(world)
+		!interPosition.north	= !volume.from.north
+		!labelType				= !view.owner.owner.name + '/GRIDLABELS/SOUTH'
+		!result = !this.GetGridMessage(!list[1],!interPosition)
+		!result[12] = !labelType
+		!southGrid.append(!result)
+		!interPosition.north	= !volume.to.north
+		!labelType				= !view.owner.owner.name + '/GRIDLABELS/NORTH'
+		!result = !this.GetGridMessage(!list[1],!interPosition)
+		!result[12] = !labelType
+		!result[12] = !labelType
+		!northGrid.append(!result)
+	endif
+	if(!gridListX.size() gt 1)then
+		do !i from 2 to !list.size()
+			!j = !i - 1
+			if(!list[$!i].pos.wrt(world).east eq !list[$!j].pos.wrt(world).east and !list[$!i].desc eq !list[$!j].desc)then
+				skip
+			else
+				!interPosition			= !list[$!i].pos.wrt(world)
+				!interPosition.north	= !volume.from.north
+				!labelType				= !view.owner.owner.name + '/GRIDLABELS/SOUTH'
+				!result = !this.GetGridMessage(!list[$!i],!interPosition)
+				!result[12] = !labelType
+				!southGrid.append(!result)
+				!interPosition.north	= !volume.to.north
+				!labelType				= !view.owner.owner.name + '/GRIDLABELS/NORTH'
+				!result = !this.GetGridMessage(!list[$!i],!interPosition)
+				!result[12] = !labelType
+				!northGrid.append(!result)
+			endif
+		enddo
+	endif
+	var !ygrid coll all sctn with (matchwild(gtype,|YGRD|)) for $!grid
+	do !ptrYgrid indices !ygrid
+		!yGridPosition = !ygrid[$!ptrYgrid].dbref().posstart.wrt(world)
+		if((!volume.from.north - !yGridPosition.north) * (!volume.to.north - !yGridPosition.north) le 0)then
+			!gridListY.append(!ygrid[$!ptrYgrid].dbref())
+		endif
+	enddo
+	!list = !this.PositionNorthSort(!gridListY)
+	--【报错修复·同上一节】Y 向轴网截断为空时，原来无条件取 !list[1] 同样会越界
+	if(!list.size() gt 0)then
+		!interPosition			= !list[1].pos.wrt(world)
+		!interPosition.east		= !volume.from.east
+		!labelType				= !view.owner.owner.name + '/GRIDLABELS/WEST'
+		!result = !this.GetGridMessage(!list[1],!interPosition)
+		!result[12] = !labelType
+		!westGrid.append(!result)
+		!interPosition.east		= !volume.to.east
+		!labelType				= !view.owner.owner.name + '/GRIDLABELS/EAST'
+		!result = !this.GetGridMessage(!list[1],!interPosition)
+		!result[12] = !labelType
+		!eastGrid.append(!result)
+	endif
+	if(!gridListY.size() gt 1)then
+		do !i from 2 to !list.size()
+			!j = !i - 1
+			if(!list[$!i].pos.wrt(world).north eq !list[$!j].pos.wrt(world).north and !list[$!i].desc eq !list[$!j].desc)then
+				skip
+			else
+				!interPosition			= !list[$!i].pos.wrt(world)
+				!interPosition.east		= !volume.from.east
+				!labelType				= !view.owner.owner.name + '/GRIDLABELS/WEST'
+				!result = !this.GetGridMessage(!list[$!i],!interPosition)
+				!result[12] = !labelType
+				!westGrid.append(!result)
+				!interPosition.east		= !volume.to.east
+				!labelType				= !view.owner.owner.name + '/GRIDLABELS/EAST'
+				!result = !this.GetGridMessage(!list[$!i],!interPosition)
+				!result[12] = !labelType
+				!eastGrid.append(!result)
+			endif
+		enddo
+	endif
+	!return[1] = !eastGrid
+	!return[2] = !westGrid
+	!return[3] = !northGrid
+	!return[4] = !southGrid
+	return !return
+endmethod
+--------------------------------------------------------------------------------------
+define method .GetGridMessage(!grid is dbref,!interPosition is position) is array
+	!view = !this.view
+	!scale = !view.vscale
+	!message = object array()
+	!message[1] = !grid
+	!message[2] = !grid.desc
+	!message[3] = !interPosition
+	--【本次修复·按你的要求】轴网标注的定位基准：老版 newgridnote 用**视图中心**
+	--   （position1.midpoint(position2)），不是轴网线自己的中点 —— 轴网线常常横跨很远，
+	--   拿它自己的中点当基准，偏移就会大得把标注甩出图外（你看到的 E1640 / Bpoff 1670 就是这么来的）。
+	--   并且要换算成**图纸绝对坐标**：view.xypos + (轴网点 − 视图中心) × vscale。
+	!limitDbelementGet = object LimitDbelementGet()
+	!limitDbelementGet.view = !view
+	!volume = !limitDbelementGet.GetVolume()
+	!centerEast  = (!volume.from.east  + !volume.to.east ) / 2
+	!centerNorth = (!volume.from.north + !volume.to.north) / 2
+	!absEast  = !view.xypos.east  + (!interPosition.east  - !centerEast ) * !scale
+	!absNorth = !view.xypos.north + (!interPosition.north - !centerNorth) * !scale
+	!message[4] = !absEast					$* x（图纸绝对坐标）
+	!message[5] = !absNorth					$* y
+	!message[6] = !absEast					$* apofx（GenerateGridNote 里再减标注 DDNM）
+	!message[7] = !absNorth				$* apofy
+	!message[8] = !absEast					$* bpofx
+	!message[9] = !absNorth				$* bpofy
+	!message[10] = 0					$* cpofx
+	!message[11] = 0					$* cpofy
+	!message[12] = ''
+	return !message
+endmethod
+--------------------------------------------------------------------------------------
+define method .GetEquipmentMessage(!equipment is dbref,!interPosition is position) is array
+	!view = !this.view
+	!scale = !view.vscale
+	!message = object array()
+	!message[1] = !equipment
+	--【本次新增·按你的要求】减相对标高(mm)：显示值 = (模型标高 - 相对标高) / 1000
+	!rel = !this.relative
+	if(!rel.unset())then
+		!rel = 0
+	endif
+	!elvation = (!equipment.pos.wrt(world).up - !rel) / 1000
+	if(!elvation lt 0)then
+		!message[2] = !equipment.flnn + ' EL ' + !elvation.string().Replace('mm','m')
+	else
+		!message[2] = !equipment.flnn + ' EL +' + !elvation.string().Replace('mm','m')
+	endif
+	!message[3] = !interPosition
+	!pofX = (!interPosition.east - !equipment.pos.wrt(world).east) * !scale
+	!pofY = (!interPosition.north - !equipment.pos.wrt(world).north) * !scale
+	!message[4] = !pofX					$* x
+	!message[5] = !pofY					$* y
+	!message[6] = !pofX					$* apofx
+	!message[7] = !pofY					$* apofy
+	!message[8] = !pofX					$* bpofx
+	!message[9] = !pofY					$* bpofy
+	!message[10] = !pofX				$* cpofx
+	!message[11] = !pofY				$* cpofy
+	!message[12] = ''
+	return !message
+endmethod
+--------------------------------------------------------------------------------------
+define method .GetEquipment() is array
+	--范围内的设备
+	!view					= !this.view
+	!limitDbelementGet		= object LimitDbelementGet()
+	!limitDbelementGet.view = !view
+	--【本次修改·按你的要求】改用唯一口径：LimitDbelementGet.GetEquiInView()
+	--   原来这里用 .pos（局部坐标）判范围、却用 .pos.wrt(world) 算距离，与名称标注口径不一致
+	!equiList = !limitDbelementGet.GetEquiInView()
+	!volume = !limitDbelementGet.GetVolume()
+	!eastEquipment			= object array()
+	!westEquipment			= object array()
+	!northEquipment			= object array()
+	!southEquipment			= object array()
+	!equipmentMessage		= object array()
+	do !ptrEquiList indices !equiList
+		!distN = abs(!equiList[$!ptrEquiList].pos.wrt(world).north - !volume.to.north)
+		!distS = abs(!equiList[$!ptrEquiList].pos.wrt(world).north - !volume.from.north)
+		if(!distN lt !distS)then
+			!interPosition			= !equiList[$!ptrEquiList].pos.wrt(world)
+			!interPosition.north	= !volume.to.north
+			!labelType				= !view.owner.owner.name + '/GRIDLABELS/north'
+			!result = !this.GetEquipmentMessage(!equiList[$!ptrEquiList],!interPosition)
+			!result[5] = !result[5] + 60
+			!result[9] = !result[9] + 30
+			!result[11] = !result[11] + 30
+			!result[12] = !labelType
+			!northEquipment.append(!result)
+		else
+			!interPosition			= !equiList[$!ptrEquiList].pos.wrt(world)
+			!interPosition.north	= !volume.from.north
+			!labelType				= !view.owner.owner.name + '/GRIDLABELS/SOUTH'
+			!result = !this.GetEquipmentMessage(!equiList[$!ptrEquiList],!interPosition)
+			!result[5] = !result[5] - 60
+			!result[9] = !result[9] - 30
+			!result[11] = !result[11] - 30
+			!result[12] = !labelType
+			!southEquipment.append(!result)
+		endif
+		--【本次修改·按你的要求】东西判定同样用世界坐标（原来北南用 .wrt(world)、东西却用局部 .pos，口径不一致）
+		!distE = abs(!equiList[$!ptrEquiList].pos.wrt(world).east - !volume.to.east)
+		!distW = abs(!equiList[$!ptrEquiList].pos.wrt(world).east - !volume.from.east)
+		if(!distE lt !distW)then
+			!interPosition			= !equiList[$!ptrEquiList].pos.wrt(world)
+			!interPosition.east		= !volume.to.east
+			!labelType				= !view.owner.owner.name + '/GRIDLABELS/east'
+			!result = !this.GetEquipmentMessage(!equiList[$!ptrEquiList],!interPosition)
+			!result[4] = !result[4] + 60
+			!result[8] = !result[8] + 30
+			!result[10] = !result[10] + 30
+			!result[12] = !labelType
+			!eastEquipment.append(!result)
+		else
+			!interPosition			= !equiList[$!ptrEquiList].pos.wrt(world)
+			!interPosition.east		= !volume.from.east
+			!labelType				= !view.owner.owner.name + '/GRIDLABELS/west'
+			!result = !this.GetEquipmentMessage(!equiList[$!ptrEquiList],!interPosition)
+			!result[4] = !result[4] - 60
+			!result[8] = !result[8] - 30
+			!result[10] = !result[10] - 30
+			!result[12] = !labelType
+			!westEquipment.append(!result)
+		endif
+	enddo
+	!return[1] = !eastEquipment
+	!return[2] = !westEquipment
+	!return[3] = !northEquipment
+	!return[4] = !southEquipment
+	return !return
+endmethod
+--------------------------------------------------------------------------------------
+--【本次新增·按你的要求】"二层（内层）"要标注的要素位置（四个方向各一份，只给世界坐标）：
+--   设备布置图 → 设备；仪表点位图 → 仪表（见 GetInstrumentPositions）。
+--   与 GetEquipment() 的分侧逻辑一致（比到哪条边近就归哪一侧），只是不再分装 message 数组：
+--   二层点集只需要位置本身。
+define method .GetEquipmentPositions() is array
+	!view = !this.view
+	!limitDbelementGet = object LimitDbelementGet()
+	!limitDbelementGet.view = !view
+	!list = !limitDbelementGet.GetEquiInView()
+	!volume = !limitDbelementGet.GetVolume()
+	!eastList = object array()
+	!westList = object array()
+	!northList = object array()
+	!southList = object array()
+	do !ptr indices !list
+		!pos = !list[$!ptr].pos.wrt(world)
+		!distN = abs(!pos.north - !volume.to.north)
+		!distS = abs(!pos.north - !volume.from.north)
+		if(!distN lt !distS)then
+			!northList.append(!pos)
+		else
+			!southList.append(!pos)
+		endif
+		!distE = abs(!pos.east - !volume.to.east)
+		!distW = abs(!pos.east - !volume.from.east)
+		if(!distE lt !distW)then
+			!eastList.append(!pos)
+		else
+			!westList.append(!pos)
+		endif
+	enddo
+	!return[1] = !eastList
+	!return[2] = !westList
+	!return[3] = !northList
+	!return[4] = !southList
+	return !return
+endmethod
+--------------------------------------------------------------------------------------
+--【本次新增·按你的要求】同上，但要素是**仪表**（仪表点位图的二层标注用）。
+--   取数用 DrawList 里的 INST（GetDrawListElement 已按视图范围过滤），坐标一律 .pos.wrt(world)。
+define method .GetInstrumentPositions() is array
+	!view = !this.view
+	!limitDbelementGet = object LimitDbelementGet()
+	!limitDbelementGet.view = !view
+	!list = !limitDbelementGet.GetInstInView()
+	!volume = !limitDbelementGet.GetVolume()
+	!eastList = object array()
+	!westList = object array()
+	!northList = object array()
+	!southList = object array()
+	do !ptr indices !list
+		!pos = !list[$!ptr].pos.wrt(world)
+		!distN = abs(!pos.north - !volume.to.north)
+		!distS = abs(!pos.north - !volume.from.north)
+		if(!distN lt !distS)then
+			!northList.append(!pos)
+		else
+			!southList.append(!pos)
+		endif
+		!distE = abs(!pos.east - !volume.to.east)
+		!distW = abs(!pos.east - !volume.from.east)
+		if(!distE lt !distW)then
+			!eastList.append(!pos)
+		else
+			!westList.append(!pos)
+		endif
+	enddo
+	!return[1] = !eastList
+	!return[2] = !westList
+	!return[3] = !northList
+	!return[4] = !southList
+	return !return
+endmethod
+--------------------------------------------------------------------------------------
+define method .GetTubiMessage() is array
+	!view						=	!this.view
+	!limitDbelementGet			=	object LimitDbelementGet()
+	!limitDbelementGet.view		=	!view
+	!volume						=	!limitDbelementGet.GetVolume()
+	!westPosition				=	object array()
+	!eastPosition				=	object array()
+	!northPosition				=	object array()
+	!southPosition				=	object array()
+	!return						=	object array()
+	!tubiList = !limitDbelementGet.GetDrawListElement('TUBI')
+	do !ptrTubiList indices !tubiList
+		!aPos = !tubiList[$!ptrTubiList].apos
+		!lPos = !tubiList[$!ptrTubiList].lpos
+		!tubiDist = !aPos.distance(!lPos)
+		if(!tubiDist lt 500)then
+			skip
+		endif
+		!deltaX = abs(!aPos.east - !lPos.east)
+		!deltaY = abs(!aPos.north - !lPos.north)
+		!deltaZ = abs(!aPos.up - !lPos.up)
+		if(!deltaX lt 1 and !deltaY ge 1)then	$*正南北方向
+			--如果超出了范围了的话不用汇总，等下有其他的计算
+			!bool = !limitDbelementGet.IsPointWithinLimit(!aPos,!volume) and !limitDbelementGet.IsPointWithinLimit(!lPos,!volume) 
+			if(!bool.not())then
+				skip
+			endif
+			!distAN = abs(!aPos.north - !volume.to.north)
+			!distAS = abs(!aPos.north - !volume.from.north)
+			!distLN = abs(!lPos.north - !volume.to.north)
+			!distLS = abs(!lPos.north - !volume.from.north)
+			if(!distAN le !distAS and !distAN le !distLN and !distAN le !distLS)then
+				!northPosition.append(!aPos)
+			elseif(!distAS le !distAN and !distAS le !distLN and !distAS le !distLS)then
+				!southPosition.append(!aPos)
+			elseif(!distLN le !distAN and !distLN le !distAS and !distLN le !distLS)then
+				!northPosition.append(!lPos)
+			elseif(!distLS le !distAN and !distLS le !distAS and !distLS le !distLN)then
+				!southPosition.append(!lPos)	
+			endif
+		elseif(!deltaX gt 1 and !deltaY lt 1)then	$*正东西方向
+			--如果超出了范围了的话不用汇总，等下有其他的计算
+			!bool = !limitDbelementGet.IsPointWithinLimit(!aPos,!volume) and !limitDbelementGet.IsPointWithinLimit(!lPos,!volume) 
+			if(!bool.not())then
+				skip
+			endif
+			!distAE = abs(!aPos.east - !volume.to.east)
+			!distAW = abs(!aPos.east - !volume.from.east)
+			!distLE = abs(!lPos.east - !volume.to.east)
+			!distLW = abs(!lPos.east - !volume.from.east)
+			if(!distAE le !distAW and !distAE le !distLE and !distAE le !distLW)then
+				!eastPosition.append(!aPos)
+			elseif(!distAW le !distAE and !distAW le !distLE and !distAW le !distLW)then
+				!westPosition.append(!aPos)
+			elseif(!distLE le !distAE and !distLE le !distAW and !distLE le !distLW)then
+				!eastPosition.append(!lPos)
+			elseif(!distLW le !distAE and !distLW le !distAW and !distLW le !distLE)then
+				!westPosition.append(!lPos)	
+			endif
+		endif
+	enddo
+	!return[1] = !eastPosition
+	!return[2] = !westPosition
+	!return[3] = !northPosition
+	!return[4] = !southPosition
+	return !return
+endmethod
+--------------------------------------------------------------------------------------
+define method .GetPipelineIntersection() is array
+	!view			=	!this.view
+	!limitDbelementGet = object LimitDbelementGet()
+	!limitDbelementGet.view = !view
+	!pipes = !limitDbelementGet.GetDrawListElement('PIPE')				$*直接获取范围内的管道
+	!volume = !limitDbelementGet.GetVolume()
+	!orientation = Z is N and y is U
+	!plane = object plane(!volume.to,!orientation)						$*北侧的面
+	!this.progressBase = 20
+	!this.progressSpan = 2
+	!northArray = !this.GetPipelineAndPlaneIntersection(!pipes,!plane,!volume)
+	!orientation = Z is E and y is U
+	!plane = object plane(!volume.to,!orientation)						$*东侧的面
+	!this.progressBase = 22
+	!this.progressSpan = 2
+	!eastArray = !this.GetPipelineAndPlaneIntersection(!pipes,!plane,!volume)
+	!orientation = Z is N and y is U
+	!plane = object plane(!volume.from,!orientation)					$*南侧的面
+	!this.progressBase = 24
+	!this.progressSpan = 2
+	!southArray = !this.GetPipelineAndPlaneIntersection(!pipes,!plane,!volume)
+	!orientation = Z is E and y is U
+	!plane = object plane(!volume.from,!orientation)					$*西侧的面
+	!this.progressBase = 26
+	!this.progressSpan = 2
+	!westArray = !this.GetPipelineAndPlaneIntersection(!pipes,!plane,!volume)
+	!orientation = y is N and z is U
+	!plane = object plane(!volume.to,!orientation)						$*上方的面
+	!this.progressBase = 28
+	!this.progressSpan = 2
+	!upArray = !this.GetPipelineAndPlaneIntersection(!pipes,!plane,!volume)
+	!orientation = y is N and z is U
+	!plane = object plane(!volume.from,!orientation)					$*下方的面
+	!this.progressBase = 30
+	!this.progressSpan = 2
+	!downArray = !this.GetPipelineAndPlaneIntersection(!pipes,!plane,!volume)
+	do !i indices !upArray
+		if(!upArray[$!i][3].east lt !volume.box().position.east)then
+			!westArray.append(!upArray[$!i])
+		else
+			!eastArray.append(!upArray[$!i])
+		endif
+		if(!upArray[$!i][3].north lt !volume.box().position.north)then
+			!southArray.append(!upArray[$!i])
+		else
+			!northArray.append(!upArray[$!i])
+		endif
+	enddo
+	do !i indices !downArray
+		if(!downArray[$!i][3].east lt !volume.box().position.east)then
+			!westArray.append(!downArray[$!i])
+		else
+			!eastArray.append(!downArray[$!i])
+		endif
+		
+		if(!downArray[$!i][3].north lt !volume.box().position.north)then
+			!southArray.append(!downArray[$!i])
+		else
+			!northArray.append(!downArray[$!i])
+		endif
+	enddo
+	!return = object array()
+	
+	!east = object array()
+	!west = object array()
+	!north = object array()
+	!south = object array()
+	
+	!this.progressBase = 32
+	!this.progressSpan = 3
+	!labelType = !view.owner.owner.name + '/DIMLABELS/EAST'
+	do !i indices !eastArray
+		!east.append(!this.GetPipelineMessage(!eastArray[$!i],!labelType,!volume))
+	enddo
+	!labelType = !view.owner.owner.name + '/DIMLABELS/WEST'
+	do !i indices !westArray
+		!west.append(!this.GetPipelineMessage(!westArray[$!i],!labelType,!volume))
+	enddo
+	!labelType = !view.owner.owner.name + '/DIMLABELS/NORTH'
+	do !i indices !northArray
+		!north.append(!this.GetPipelineMessage(!northArray[$!i],!labelType,!volume))
+	enddo
+	!labelType = !view.owner.owner.name + '/DIMLABELS/SOUTH'
+	do !i indices !southArray
+		!south.append(!this.GetPipelineMessage(!southArray[$!i],!labelType,!volume))
+	enddo
+	
+	!return[1] = !east
+	!return[2] = !west
+	!return[3] = !north
+	!return[4] = !south
+	return !return
+endmethod
+--------------------------------------------------------------------------------------
+define method .GetPipelineMessage(!array is array,!labelType is string,!volume is volume) is array
+	--【报错修复】(2,751) Variable !REL does not exist
+	--   23.85 第一次加这段时，它被插进了下面 if(...BRAN...) 的**分支里面**，
+	--   走 else 那条路时 !rel 还没被赋值 → 报变量不存在。现在挪到方法开头，两条分支都覆盖。
+	--【本次新增·按你的要求】相对标高(mm)：与 GridDataGet.BopFromElement 同一口径
+	!rel = !this.relative
+	if(!rel.unset())then
+		!rel = 0
+	endif
+	!skip = false
+	!elvationMark = false
+	if(!labelType.matchwild('*NORTH'))then
+		!gapX = 0
+		!gapY = 30
+		!deltaX = 0
+		!deltaY = !array[3].north - !volume.to.north
+		if(abs(!deltaY) gt 0.1)then
+			!skip = true
+			!elvationMark = true
+		endif
+	elseif(!labelType.matchwild('*SOUTH'))then
+		!gapX = 0
+		!gapY = -30
+		!deltaX = 0
+		!deltaY = !array[3].north - !volume.from.north
+		if(abs(!deltaY) gt 0.1)then
+			!skip = true
+			!elvationMark = true
+		endif
+	elseif(!labelType.matchwild('*EAST'))then
+		!gapX = 30
+		!gapY = 0
+		!deltaX = !array[3].east - !volume.to.east
+		!deltaY = 0
+		if(abs(!deltaX) gt 0.1)then
+			!elvationMark = true
+		endif
+	elseif(!labelType.matchwild('*WEST'))then
+		!gapX = -30
+		!gapY = 0
+		!deltaX = !array[3].east - !volume.from.east
+		!deltaY = 0
+		if(abs(!deltaX) gt 0.1)then
+			!elvationMark = true
+		endif
+	endif
+	!message = object array()
+	!message[1] = !array[1]
+	
+	!message[3] = !array[3]
+	!view = !this.view
+	!scale = !view.vscale
+	
+	
+	if(!elvationMark)then
+		if(!array[1].type eq 'BRAN')then
+			!name = !array[1].owner.flnn
+			!mess = !name		$*【本次修改·按你的要求】没有 EL 时不换行（改用 -Bbody 样式）
+			!message[2] = !mess
+		else
+			!name = !array[1].owner.owner.flnn
+			!mess = !name		$*【本次修改·按你的要求】没有 EL 时不换行（改用 -Bbody 样式）
+			!message[2] = !mess 
+		endif
+	else
+		if(!array[1].type eq 'BRAN')then
+			!name = !array[1].owner.flnn
+			!aod = !array[1].phod
+			!elvation = (!array[2].up - !aod / 2 - !rel) / 1000
+			!mess = !name + '#/' + 'BOP EL. ' + !elvation.string('D2').replace('mm','m')
+			!message[2] = !mess
+		else
+			!name = !array[1].owner.owner.flnn
+			!aod = !array[1].aod
+			!elvation = (!array[2].up - !aod / 2 - !rel) / 1000
+			!mess = !name + '#/' + 'BOP EL. ' + !elvation.string('D2').replace('mm','m')
+			!message[2] = !mess 
+		endif
+	endif
+	!pofX = (!message[3].east - !array[2].east - !deltaX) * !scale
+	!pofY = (!message[3].north - !array[2].north - !deltaY) * !scale
+	
+	!message[4] = !pofX + !gapX	* 1.5				$* x
+	!message[5] = !pofY + !gapY * 1.5				$* y
+	!message[6] = !pofX 						$* apofx
+	!message[7] = !pofY							$* apofy
+	!message[8] = !pofX + !gapX					$* bpofx
+	!message[9] = !pofY	+ !gapY					$* bpofy
+	!message[10] = 0							$* cpofx
+	!message[11] = 0							$* cpofy
+	if(!skip)then
+		!message[12] = 'skip'
+	else
+		--【本次修正·按你的要求】引线标注按"文字到底要不要换行"选样式：
+		--   · 要换行（文字里带换行符 #/，例如 '管线号#/BOP EL. 1.23m'）
+		--       → **必须用原来那四个样式** DIMLABELS/EAST|WEST|NORTH|SOUTH（ALIGN Hbody）；
+		--         要换行的标注绝对不能用带 -Bbody 的样式。
+		--   · 单行文字（纯管线号 / 名称）→ 用 -Bbody 不换行样式（GenerateBbodyLabelLib 建的）。
+		--   判据直接用换行符 #/ 本身（不再看 'EL' 字样），管线号里正好带 EL 也不会被误判。
+		!needWrap = false
+		!atext = !message[2]
+		if(!atext.unset())then
+			!atext = ''
+		endif
+		if(!atext.matchwild('*#/*'))then
+			!needWrap = true
+		endif
+		if(!atext.matchwild('*BOP EL*'))then
+			!needWrap = true
+		endif
+		-- needWrap 为真 = 文字要换行 → 原样式（不带 -Bbody）；否则才用 -Bbody
+		if(!needWrap)then
+			!message[12] = !labelType
+		else
+			!message[12] = !labelType + '-Bbody'
+		endif
+	endif
+	return !message
+endmethod
+--------------------------------------------------------------------------------------
+define method .GetPipelineAndPlaneIntersection(!pipes is array,!plane is plane,!volume is volume) is array
+	!dbList = object array()
+	!limitDbelementGet = object LimitDbelementGet()
+	!pointArray = object array()
+	do !ptrPipes indices !pipes											$*要从branch出发去判断
+		!this.ProgressAt(!ptrPipes / !pipes.size())
+		var !branchs coll all branch for $!pipes[$!ptrPipes]
+		do !ptrBranchs indices !branchs
+			var !components coll all branch member with (match(type,'ATTA') eq 0 and match(type,'TUBI') eq 0 ) for $!branchs[$!ptrBranchs]
+			!dbList.clear()
+			!dbList.append(!branchs[$!ptrBranchs])
+			!dbList.appendarray(!components)
+			!dbList.append(!branchs[$!ptrBranchs])
+			!range = !dbList.size() - 1
+			do !currentComp from 1 to !range
+				!nextComp = !currentComp + 1
+				!currentPosition = !dbList[$!currentComp].dbref().pos.wrt(world)
+				handle any
+					!currentPosition = !dbList[$!currentComp].dbref().hpos.wrt(world)
+				endhandle
+				!nextPosition = !dbList[$!nextComp].dbref().pos.wrt(world)
+				handle any
+					!nextPosition = !dbList[$!nextComp].dbref().tpos.wrt(world)
+				endhandle
+				if(!currentPosition eq !nextPosition)then
+					skip
+				endif
+				!componentLine = object line(!currentPosition,!nextPosition)
+				!interPostion = !plane.intersection(!componentLine)
+				handle any
+					skip
+				endhandle
+				!currentDistance = !interPostion.distance(!currentPosition)
+				!nextDistance = !interPostion.distance(!nextPosition)
+				!lineDistance = !currentPosition.distance(!nextPosition)
+				if(!currentDistance lt !lineDistance and !nextDistance lt !lineDistance)then
+					if(!limitDbelementGet.IsPointWithinLimit(!interPostion,!volume).not())then
+						skip
+					endif
+					!message[1] = !dbList[$!currentComp].dbref()
+					!message[2] = !currentPosition
+					!message[3] = !interPostion
+					!pointArray.append(!message)
+				endif
+			enddo
+		enddo
+	enddo
+	return !pointArray
+endmethod
+--------------------------------------------------------------------------------------
+define method .GenerateSytmNote(!message is array)
+	!element = !message[1]
+	!type = !message[1].type
+	!xpos = !message[4]
+	!ypos = !message[5]
+	!axoff = !message[6]
+	!ayoff = !message[7]
+	!bxoff = !message[8]
+	!byoff = !message[9]
+	!cxoff = !message[10]
+	!cyoff = !message[11]
+	!sytm = !message[12]
+	!mess = !message[2]
+	--【2026-10-31】引线线型：默认 Solid；message[13]='dashed' 时用虚线（设备名标注用）
+	!llstyl = 'Solid'
+	if(!message.size() ge 13)then
+		if(!message[13] eq 'dashed')then
+			!llstyl = 'Dashed'
+		endif
+	endif
+	if(!sytm eq 'skip')then
+		return
+	endif
+	NEW SLABEL
+	DDNM $!type $!element
+	XYPS $!xpos $!ypos
+	LLCL 0mm
+	TSIZ 2.5
+	LTER Off
+	LLEA true
+	APOF $!axoff $!ayoff
+	BPOF $!bxoff $!byoff
+	CPOF $!cxoff $!cyoff
+	LSHA Bent
+	FONT 1
+	BLNK true
+	BMAR 0mm
+	CHEI 2.5mm
+	TXCOLO 10
+	LLSTYL $!llstyl
+	LLCOLO 10
+	LFSTYL Solid
+	LFCOLO 10
+	JUST Left
+	ALIGN Bbody
+	--【23.157 修改·按你的反馈】改用对象接口写入：命令行形式 ATEXT '$!mess' 会被管名里的引号截断
+	!this.SetSlabText(!mess)
+	TMRF SYTM $!sytm
+endmethod			
+--------------------------------------------------------------------------------------
+--【本次新增·按你的要求】轴网标注（Grid note）**单独一个方法** —— 老版就是这样分的：
+--   pipelayout.pmlfrm 里 newgridnote（轴网，2956-3110）与 newnote（管道/其它，3120+）是两个方法，
+--   因为定位算法不是一回事。本次把轴网这条按老版原样搬过来：
+--     · 基准点 = **视图中心**（老版 position1.midpoint(position2)），不是轴网线中点；
+--     · message[4]/[5] 由 GetGridMessage 给的是**图纸绝对坐标**（view.xypos + 差×比例）；
+--     · 标注带 DDNM，XYPS/APOF/BPOF/CPOF 都是**相对锚点**的值 → 先读标注当前 DDNMXY 再作差；
+--     · 四个方向的 ±60 / ±50 / ±30 / ±5 与 CPOF 微调逐项照抄老版（E/W/N/S）。
+define method .GenerateGridNote(!message is array)
+	!element = !message[1]
+	!type = !message[1].type
+	!sytm = !message[12]
+	!mess = !message[2]
+	!absEast = !message[4]
+	!absNorth = !message[5]
+	if(!sytm eq 'skip')then
+		return
+	endif
+	NEW SLABEL
+	DDNM $!type $!element
+	-- 读标注锚点（由 DDNM 决定）在图纸上的位置
+	!ddnmx = !!ce.ddnmxy[1]
+	!ddnmy = !!ce.ddnmxy[2]
+	!axoff = !absEast - !ddnmx
+	!ayoff = !absNorth - !ddnmy
+	-- 默认用 SOUTH 那一组（老版 S 分支），再按 SYTM 名里的方向覆盖
+	!xpos = !axoff + 5
+	!ypos = !ayoff - 60
+	!bxoff = !axoff
+	!byoff = !ayoff - 30
+	!cpx = -5
+	!cpy = 12
+	if(!sytm.matchwild('*EAST*'))then
+		!xpos = !axoff + 60
+		!ypos = !ayoff - 5
+		!bxoff = !axoff + 30
+		!byoff = !ayoff
+		!cpx = -12
+		!cpy = 5
+	elseif(!sytm.matchwild('*WEST*'))then
+		!xpos = !axoff - 50
+		!ypos = !ayoff - 5
+		!bxoff = !axoff - 30
+		!byoff = !ayoff
+		!cpx = 2
+		!cpy = 5
+	elseif(!sytm.matchwild('*NORTH*'))then
+		!xpos = !axoff + 5
+		!ypos = !ayoff + 50
+		!bxoff = !axoff
+		!byoff = !ayoff + 30
+		!cpx = -5
+		!cpy = -2
+	endif
+	XYPS $!xpos $!ypos
+	LLCL 0mm
+	TSIZ 2.5
+	LTER Off
+	LLEA true
+	APOF $!axoff $!ayoff
+	BPOF $!bxoff $!byoff
+	--【本次修正·按你的要求】CPOF 保持 0 0：老版那个符号(GRIDLABELSRIGHT/LIBY)需要 CPOF 微调，
+	--   我们的 GRIDLABELS/* 不需要 —— 原来就是 0，23.110 我照搬老版改成了非 0，现按你的要求改回。
+	CPOF 0 0
+	LSHA Bent
+	FONT 1
+	BLNK true
+	BMAR 0mm
+	CHEI 2.5mm
+	TXCOLO 10
+	LLSTYL Solid
+	LLCOLO 10
+	LFSTYL Solid
+	LFCOLO 10
+	JUST Left
+	ALIGN Bbody
+	--【23.157 修改·按你的反馈】改用对象接口写入：命令行形式 ATEXT '$!mess' 会被管名里的引号截断
+	!this.SetSlabText(!mess)
+	TMRF SYTM $!sytm
+endmethod
+--------------------------------------------------------------------------------------
+define method .PositionEastSort(!list is array) is array
+	--按照坐标点的东西坐标排序
+	do !i from 1 to !list.size()
+		do !j from 1 to !list.size() - !i
+			!k = !j + 1
+			if(!list[$!j].east ge !list[$!k].east)then
+				!temp = !list[$!j]
+				!list[$!j] = !list[$!k]
+				!list[$!k] = !temp
+			endif
+		enddo
+	enddo
+	return !list
+endmethod
+--------------------------------------------------------------------------------------
+define method .PositionNorthSort(!list is array) is array
+	--按照坐标点的南北坐标排序
+	do !i from 1 to !list.size()
+		do !j from 1 to !list.size() - !i
+			!k = !j + 1
+			if(!list[$!j].north ge !list[$!k].north)then
+				!temp = !list[$!j]
+				!list[$!j] = !list[$!k]
+				!list[$!k] = !temp
+			endif
+		enddo
+	enddo
+	return !list
+endmethod
+--------------------------------------------------------------------------------------
+define method .GenerateLDIM(!dir is string,!position is string)
+	--尺寸标注
+	NEW LDIMENSION
+	DIR $!dir
+	DPOS $!position
+	DMSP 0mm
+	TSIZ 2.5mm
+	DTER Arrows
+	PJUS Towards
+	DFON 11
+	PFON 11
+	PLSP 0
+	PLCL 0mm
+	OSHT 2mm
+	DTCH 2.5mm
+	PTCH 2.5mm
+	BLNK true
+	BMAR 0mm
+	FTER Off
+	PLTX ''
+	--【本次修改·按你的要求】LDIM 的线型与颜色：
+	--   · DLSTYL（尺寸线）8002 → **8001**
+	--   · PLSTYL（投影线/尺寸界线）8002 → **8003**
+	--   · 四个颜色（DLCOLO 尺寸线 / PLCOLO 投影线 / DTCOLO 尺寸文字 / PTCOLO 投影文字）
+	--     全部 6 → **10**
+	--   老版三处建 LDIM 的地方（pipelayout.pmlfrm 1175、1576、2442-2445）用的是
+	--   8002/8002 + 颜色 6/16，此处按你的出图要求统一改掉；只改本方法（建 LDIM 的唯一入口），
+	--   GenerateDpoi（DPOINT）不动。
+	DLSTYL 8001
+	PLSTYL 8003
+	DLCOLO 10
+	PLCOLO 10
+	DTCOLO 10
+	PTCOLO 10
+endmethod
+--------------------------------------------------------------------------------------
+define method .GenerateDpoi(!list is array)
+	--【本次修改·按你的要求】每个 LDIM 的**第一个和最后一个 DPOI**，
+	--   其投影线线型 PLSTYL 由 `Default`（跟随图层）改为 **8001**，中间的点保持 Default。
+	--   说明：
+	--     · 本方法每次调用对应**一个 LDIM**（调用点见 Generate() 里
+	--       `GenerateLDIM(...)` 后紧接 `GenerateDpoi(!eastlist)` 那 14 处），
+	--       列表已按位置排过序（PositionNorthSort 等），所以"第一个/最后一个"
+	--       就是该尺寸链两端的尺寸点；
+	--     · 判断两端用嵌套 if（不依赖 or 的短路行为），只有 1 个点时它同时算首尾；
+	--     · 老版此处 11 个属性全是 Default（pipelayout.pmlfrm 同款代码），
+	--       本次属你指定的出图要求，与老版有意不同。
+	--   另外 LDIM 自身的 DLSTYL/PLSTYL/颜色已按 23.12 改成 8001/8003/10。
+	!count = !list.size()
+	do !i indices !list
+		!position = !list[$!i]
+		!isEnd = false
+		!this.ProgressAt(!i / !count)
+		if(!i eq 1)then
+			!isEnd = true
+		elseif(!i eq !count)then
+			!isEnd = true
+		endif
+		NEW DPOINT
+		POS $!position
+		PLSP Default
+		PLCL Default
+		OSHT Default
+		PJUS Default
+		PLTX Default
+		DLSTYL Default
+		DLCOLO Default
+		-- 两端点 → 8001；中间点 → Default（跟随图层）
+		if(!isEnd)then
+			PLSTYL 8001
+		else
+			PLSTYL Default
+		endif
+		PLCOLO Default
+		DTCOLO Default
+		PTCOLO Default
+	enddo
+endmethod
+--------------------------------------------------------------------------------------
+define method .ChangeLdim()
+	--这个用来修改一下所有的ldim，消除ldim的显示bug
+	view
+	var !ldim coll all ldim for ce
+	do !ptrldim indices !ldim
+		!ldim[$!ptrldim].dbref().Lchain = false
+		!ldim[$!ptrldim].dbref().Lchain = true
+	enddo
+endmethod
+--------------------------------------------------------------------------------------
+define method .GenerateDimesionLabel(!element is dbref,!message is string,!labelType is string)
+	!type = !element.type
+	NEW SLABEL
+	DDNM $!type $!element
+	XYPS 0 0
+	LLCL 0mm
+	TSIZ 2.5
+	LTER Off
+	LLEA true
+	APOF 0 0
+	BPOF 0 0
+	CPOF 0 0
+	LSHA Bent
+	FONT 1
+	BLNK true
+	BMAR 0mm
+	CHEI 2.5mm
+	TXCOLO 10
+	LLSTYL Solid
+	LLCOLO 10
+	LFSTYL Solid
+	LFCOLO 10
+	JUST Left
+	ALIGN Bbody
+	--【23.157 修改·按你的反馈】同上：改用对象接口写入
+	!this.SetSlabText(!message)
+	TMRF SYTM $!labelType
+endmethod
+--------------------------------------------------------------------------------------
+define method .GetPipeMessage(!list is array,!direction is string,!labelType is string) is array
+	if(!direction eq 'E')then
+		!xoffset = 30
+		!yoffset = 0
+	elseif(!direction eq 'W')then
+		!xoffset = -30
+		!yoffset = 0
+	elseif(!direction eq 'N')then
+		!xoffset = 0
+		!yoffset = 30
+	elseif(!direction eq 'S')then
+		!xoffset = 0
+		!yoffset = -30
+	endif
+	!view = !this.view
+	!scale = !view.vscale
+	!message = object array()
+	!reutrn = object array()
+	do !i indices !list
+		!message[1] = !list[$!i][2].dbref()
+		!pipeName = flnn of pipe of $!list[$!i][2]
+		!atext = !pipeName
+		!message[2] = !atext
+		!interPosition = !list[$!i][1]
+		!message[3] = !interPosition
+		!elementPositionX = !list[$!i][2].dbref().pos.wrt(world).east
+		handle(2,779)
+			!elementPositionX = !list[$!i][2].dbref().hpos.wrt(world).east
+		endhandle
+		!elementPositionY = !list[$!i][2].dbref().pos.wrt(world).north
+		handle(2,779)
+			!elementPositionY = !list[$!i][2].dbref().hpos.wrt(world).north
+		endhandle
+		!pofX = (!interPosition.east - !elementPositionX) * !scale
+		!pofY = (!interPosition.north - !elementPositionY) * !scale
+		!message[4] = !pofX + !xoffset * 2
+		!message[5] = !pofY + !yoffset * 2
+		!message[6] = !pofX
+		!message[7] = !pofY
+		!message[8] = !pofX + !xoffset
+		!message[9] = !pofY + !yoffset
+		!message[10] = 0
+		!message[11] = 0
+		--【本次修正·按你的要求】引线标注按"文字到底要不要换行"选样式：
+		--   要换行（文字里带 #/）→ 原样式 DIMLABELS/EAST|WEST|NORTH|SOUTH（ALIGN Hbody），不能用 -Bbody；
+		--   单行文字 → -Bbody 不换行样式。判据用换行符 #/ 本身，不看 'EL' 字样。
+		!needWrap = false
+		!atext = !message[2]
+		if(!atext.unset())then
+			!atext = ''
+		endif
+		if(!atext.matchwild('*#/*'))then
+			!needWrap = true
+		endif
+		if(!atext.matchwild('*BOP EL*'))then
+			!needWrap = true
+		endif
+		-- needWrap 为真 = 文字要换行 → 原样式（不带 -Bbody）；否则才用 -Bbody
+		if(!needWrap)then
+			!message[12] = !labelType
+		else
+			!message[12] = !labelType + '-Bbody'
+		endif
+		!reutrn.append(!message)
+	enddo
+	return !reutrn
+endmethod
+--------------------------------------------------------------------------------------
+--------------------------------------------------------------------------------------
+--【本次新增·按你的要求】轴网中心线（点划线）
+--   在 VIEW 下新建一个 LAYE，在里面建一个 VNOTE 作为锚点，
+--   然后在 VNOTE 里逐条轴线画一条**从视图一边贯到对边**的 STRAIGHT：
+--       · 线型 NLSTYL 8004（点划线）、颜色 NLCOLO 2（红 2 号）；
+--       · XGRD（east 固定）= 竖线：从视图南边画到北边；
+--       · YGRD（north 固定）= 横线：从视图西边画到东边。
+--   轴线数据取自 .grid（与轴网标注同一套取数口径 LimitDbelementGet.GetVolume()，
+--   所以中心线与轴网标注必然对得上）；只画落在视图范围内的，坐标相同的只画一条。
+--   坐标换算：VNOTE 锚在视图中心（XYPS = view.xypos，与 LimitsNoteGenerator 的锚点同做法），
+--   端点用 Fpt/Tpt Offset 相对锚点给出：±视图半边尺寸就是"从边到边"。
+define method .DrawGridCentrelines()
+	--【23.147 新增·按你的要求】同上：E3D 走新增的 .DrawGridCentrelinesE3D()（老代码一字未动）
+	if(!this.IsE3D())then
+		!this.DrawGridCentrelinesE3D()
+		return
+	endif
+	!view = !this.view
+	!grid = !this.grid
+	if(!view.unset() or !grid.unset())then
+		return
+	endif
+	-- 视图范围（与 GetGrid 同一口径，保证中心线与轴网标注对齐）
+	!limitGet = object LimitDbelementGet()
+	!limitGet.view = !view
+	!volume = !limitGet.GetVolume()
+	!midEast  = (!volume.from.east + !volume.to.east) / 2
+	!midNorth = (!volume.from.north + !volume.to.north) / 2
+	!scale = !view.vscale
+	!cx = !view.xypos.east
+	!cy = !view.xypos.north
+	!halfX = !view.size[1] / 2
+	!halfY = !view.size[2] / 2
+	!halfXNeg = 0 - !halfX
+	!halfYNeg = 0 - !halfY
+	--【关键】先把当前元素切回 VIEW 再建图层：
+	--   本方法挂在 Generate() 末尾，而前面的 SortLabel() 内部用 $!db 导航过每个标签，
+	--   执行完 CE 停在**最后一个 SLABEL** 上；此时用相对路径建图层会建错地方（甚至报错）。
+	--   （与 23.78 管口方位图那次同一个坑：凡是 NEW 图元，先保证 CE 在正确的层级。）
+	!!ce = !view
+	-- 图层：相对路径 → 建在当前视图下（同 _Dimensions/* 的做法）
+	!layerName = !view.name + '-gridcentrelines'
+	!labelGenerator = object LabelGenerator()
+	!labelGenerator.LayerGenerate(!layerName)
+	-- 锚点 VNOTE（XYPS 用**视图中心**在图幅上的位置，不能写 0 0）
+	NEW VNOTE
+	XYPS X $!cx Y $!cy
+	JUST Left
+	ALIGN Bbody
+	FONT 1
+	BLNK true
+	BMAR 0mm
+	CHEI 2.5mm
+	CSPA 0
+	LSPA 0
+	TXCOLO 2
+	NLSTYL 8004
+	NLCOLO 2
+	FSTYLE Off
+	FCOLOUR 2
+	MSTYLE Off
+	MCOLOUR 2
+	-- 记下锚点：每画一条线之前先回锚点，否则第二条会套进第一条里面
+	!back = !!ce
+	!drawnE = object array()
+	!cntX = 0
+	!cntY = 0
+	!drawnN = object array()
+	!count = 0
+	-- ===== XGRD：east 固定 → 竖线（南 → 北）=====
+	var !xgrid coll all sctn with (matchwild(gtype,|XGRD|)) for $!grid
+	do !i indices !xgrid
+		!gx = !xgrid[$!i].dbref().posstart.wrt(world).east
+		if((!volume.from.east - !gx) * (!volume.to.east - !gx) gt 0)then
+			skip
+		endif
+			--【报错修复·逻辑极性】原来是 if(IsGridCoordNew(...))then skip ——
+			--   那是"是新坐标就跳过"，正好反了，结果一条轴线都没画出来
+			--   （图层与 VNOTE 建好了、里面是空的，就是你看到的现象）。
+			--   辅助方法改名 IsGridCoordDrawn（true = 已画过），这里判"已画过"才跳过。
+			if(!this.IsGridCoordDrawn(!drawnE,!gx))then
+			skip
+		endif
+		!cntX = !cntX + 1
+		!drawnE.append(!gx)
+		!dx = (!gx - !midEast) * !scale
+		$!back
+		NEW STRAIGHT
+		Fpt Offset X $!dx Y $!halfYNeg
+		Tpt Offset X $!dx Y $!halfY
+		NLSTYL 8004
+		NLCOLO 2
+		!count = !count + 1
+	enddo
+	-- ===== YGRD：north 固定 → 横线（西 → 东）=====
+	var !ygrid coll all sctn with (matchwild(gtype,|YGRD|)) for $!grid
+	do !i indices !ygrid
+		!gy = !ygrid[$!i].dbref().posstart.wrt(world).north
+		if((!volume.from.north - !gy) * (!volume.to.north - !gy) gt 0)then
+			skip
+		endif
+			--【同上】判"已画过"才跳过
+			if(!this.IsGridCoordDrawn(!drawnN,!gy))then
+			skip
+		endif
+		!cntY = !cntY + 1
+		!drawnN.append(!gy)
+		!dy = (!gy - !midNorth) * !scale
+		$!back
+		NEW STRAIGHT
+		Fpt Offset X $!halfXNeg Y $!dy
+		Tpt Offset X $!halfX Y $!dy
+		NLSTYL 8004
+		NLCOLO 2
+		!count = !count + 1
+	enddo
+	$!back
+	!this.centrelineCount = !count
+endmethod
+--------------------------------------------------------------------------------------
+-- 这个轴网坐标是否还没画过（同一位置常有多段 SCTN，避免重复画线）
+--   返回 true = 新坐标（可以画），false = 已经画过
+-- 这个轴网坐标是不是**已经画过**了（同一位置常有多段 SCTN，避免重复画线）
+--   返回 true = 已经画过（调用方 skip）；false = 还没画过（可以画）
+--   【23.90 改名】原名 IsGridCoordNew（true = 新坐标），调用处极性写反导致一条线都没画；
+--   改成 IsGridCoordDrawn，让"要不要跳过"读起来和判断一致。
+define method .IsGridCoordDrawn(!drawn is array,!coord is real) is boolean
+	do !i indices !drawn
+		if(!drawn[$!i] eq !coord)then
+			return true      $* 已画过
+		endif
+	enddo
+	return false     $* 还没画过
+endmethod
+--------------------------------------------------------------------------------------
+--【23.147 新增·按你的要求】E3D 轴网（GRIDFA + GRIDPL）—— 本节**全部是新增方法**，
+--   老的 PDMS 那套（SCTN + GTYPE）一个字没动，只在 .GetGrid() / .DrawGridCentrelines()
+--   最前面加了一句"判断版本后调用"。
+--
+--   做法（你的原话）：先 `var !banner banner` 判版本；banner 里有 PDMS 字样 → 走 PDMS 老方法；
+--   没有 → 说明是 E3D：先 coll all GRIDFA，遍历取 GRDAXE 判方向（'X' = 竖向轴线、'Y' = 横向轴线），
+--   再对每个 GRIDFA `coll all gridpl` 拿到平面，取 pos.wrt(world) 当坐标，
+--   之后**和之前的老方案一样**（判视图范围 → 排序 → 去重 → 建 4 组标注 message）。
+--
+--   AVEVA 自己的口径佐证（supports\draft\functions\MdsAbaLocPlanRefGrd.pmlfnc）：
+--     · `coll all GRIDFA with GRDAXE eq 'X'` 收到的平面，比较的是 datum.pos.east；Y 向比 pos.north
+--       —— 与老版 XGRD / YGRD 的 east / north 完全等价；
+--     · `coll all GRIDPL ... for $!xGrid[1]` —— 族 → 平面就是这个层级；
+--     · `!xLabel = idplane of $!xGridPlane[1]` —— 平面标签取 idplane。
+--   ⚠ PML 语法坑：方法的参数必须写类型（`define method .X(!a is dbref)`）——
+--     不写类型会报 `(47,15) CP: Syntax error`，本次踩过。
+--------------------------------------------------------------------------------------
+--探测当前是 E3D 还是 PDMS，返回 'E3D' / 'PDMS'
+--【23.161 重写·三处改进】
+--   ① handle 后置绑定：原来 `var !banner banner` 在本方法第一行，handle 挂到最后（中间隔着
+--      两段 if/endif）—— 按 PML 语义 handle 只兜"紧邻它前面那一条命令"，等于 banner 读失败时
+--      整个方法直接中断，兜底那句 'E3D' 从来没执行过。现在 handle 紧跟 var 语句。
+--   ② banner 认不出时不再直接按 E3D 猜，改为先做**能力探测**（GRIDFA → E3D / SCTN → PDMS）。
+--   ③ 新增 .dataModelSource 记录判据来源（banner / capability / default），排障时能看出
+--      "这张图为什么走了 E3D"；不打印，符合 23.159 只留出错信息的要求。
+--   人工覆盖：调用方在 .IsE3D() 之前给 .dataModel 直接赋值即可（IsE3D 只在未设置时探测）。
+define method .DetectDataModel() is string
+	var !banner banner
+	handle any
+		!this.bannerText = '<banner not readable>'
+		return !this.DetectDataModelByCapability()
+	endhandle
+	!bannerText = !banner
+	!this.bannerText = !bannerText
+	return !this.DecideModel(!bannerText)
+endmethod
+--------------------------------------------------------------------------------------
+--【23.161 新增】按 banner 原文判数据模型。
+--   顺序不能反：E3D 跑在 PDMS 内核上，E3D 的 banner 里也可能出现 'PDMS' 字样。
+--   实测：E3D = 'AVEVA E3D Design Draw Mk3.1.11.0[Z31110-056] ...'
+--         老 E3D = '...Everything3D...'；PDMS = 'AVEVA PDMS 12.1.SP4 ...'
+--   两种标记都认不出 → 交给能力探测（不再默认猜 E3D）。
+define method .DecideModel(!bannerText is string) is string
+	if(!bannerText.match('Everything') gt 0)then
+		!this.dataModelSource = 'banner'
+		return 'E3D'
+	endif
+	if(!bannerText.match('E3D') gt 0)then
+		!this.dataModelSource = 'banner'
+		return 'E3D'
+	endif
+	if(!bannerText.match('PDMS') gt 0)then
+		!this.dataModelSource = 'banner'
+		return 'PDMS'
+	endif
+	return !this.DetectDataModelByCapability()
+endmethod
+--------------------------------------------------------------------------------------
+--【23.161 新增】能力探测：看库里到底有 GRIDFA（E3D）还是 SCTN（PDMS）。
+--   只在 banner 读不到 / 认不出时才走这里，正常路径不多付任何代价。
+--   两次 coll 各自单独兜底：元素类型不存在会抛错，抛错就说明该模型没有这类轴网。
+--   ⚠ 语义要点：!faOk 必须在 coll **之前**置 true，handle 紧跟 coll —— 这样 handle 绑定的
+--     才是 coll 这条命令；!fas 只在 !faOk 为真时才碰（coll 失败时 var 可能没声明成功）。
+define method .DetectDataModelByCapability() is string
+	!nFa = 0
+	!faOk = true
+	var !fas coll all gridfa
+	handle any
+		!faOk = false
+	endhandle
+	if(!faOk)then
+		!nFa = !fas.size()
+	endif
+	if(!nFa gt 0)then
+		!this.dataModelSource = 'capability-gridfa'
+		return 'E3D'
+	endif
+	!nSctn = 0
+	!scOk = true
+	var !sctns coll all sctn
+	handle any
+		!scOk = false
+	endhandle
+	if(!scOk)then
+		!nSctn = !sctns.size()
+	endif
+	if(!nSctn gt 0)then
+		!this.dataModelSource = 'capability-sctn'
+		return 'PDMS'
+	endif
+	!this.dataModelSource = 'default'
+	return 'E3D'
+endmethod
+--------------------------------------------------------------------------------------
+--true = E3D（GRIDFA + GRIDPL），false = PDMS（SCTN + GTYPE）
+--   结果缓存在 .dataModel：一张图只读一次 banner（23.159 起不再打印探测结果）
+define method .IsE3D() is boolean
+	!model = !this.dataModel
+	if(!model.unset())then
+		!model = !this.DetectDataModel()
+		!this.dataModel = !model
+	endif
+	if(!model eq 'PDMS')then
+		return false
+	endif
+	return true
+endmethod
+--------------------------------------------------------------------------------------
+--E3D：取某个方向的轴网平面（GRIDPL）dbref 数组
+--   !dir = 'X' → 竖向轴线（平面 east 固定）   !dir = 'Y' → 横向轴线（north 固定）
+--   ① coll all GRIDFA with (grdaxe eq ...) for $!grid  ← 先按你设置的那套轴网收
+--   ② 一个都没有（或没设轴网）→ 整库 coll all gridfa（选中的轴网里没有 GRIDFA 时会打印一行说明）
+--   ③ 对每个 GRIDFA 再 coll all gridpl for $!fa
+define method .GetGridPlanesE3D(!dir is string) is array
+	--【报错修复】(46,28) ERROR - Variable GRID not defined
+	--   `$!grid` 代入命令时取的是**本方法里的局部变量**，不是 !this.grid ——
+	--   老 .GetGrid() / .DrawGridCentrelines() 也都是先在方法里写一句 `!grid = !this.grid`
+	--   再代入命令的（同理本方法后面 `for $!fa` 用的是循环里赋过值的局部 !fa，没问题）。
+	!grid = !this.grid
+	!faList = object array()
+	if(!grid.unset())then
+	elseif(!dir eq 'Y')then
+		var !faY coll all gridfa with (grdaxe eq 'Y') for $!grid
+		do !i indices !faY
+			!faList.append(!faY[$!i].dbref())
+		enddo
+	else
+		var !faX coll all gridfa with (grdaxe eq 'X') for $!grid
+		do !i indices !faX
+			!faList.append(!faX[$!i].dbref())
+		enddo
+	endif
+	if(!faList.size() lt 1)then
+		$p No GRIDFA under the selected grid - collecting ALL GRIDFA in the MDB instead.
+		if(!dir eq 'Y')then
+			var !faAllY coll all gridfa with (grdaxe eq 'Y')
+			do !i indices !faAllY
+				!faList.append(!faAllY[$!i].dbref())
+			enddo
+		else
+			var !faAllX coll all gridfa with (grdaxe eq 'X')
+			do !i indices !faAllX
+				!faList.append(!faAllX[$!i].dbref())
+			enddo
+		endif
+	endif
+	!planes = object array()
+	do !f indices !faList
+		!fa = !faList[$!f]
+		var !sub coll all gridpl for $!fa
+		do !p indices !sub
+			!planes.append(!sub[$!p].dbref())
+		enddo
+	enddo
+	return !planes
+endmethod
+--------------------------------------------------------------------------------------
+--E3D 轴网平面的标注文字：idplane（平面编号，'1' / 'A' 这种）→ desc → 元素名
+define method .GridLabelE3D(!plane is dbref) is string
+	!txt = !plane.idplane
+	--【兜底】个别版本 / 个别族上取不到 IDPLANE（属性不存在会抛 2,779）→ 退回 desc / 元素名
+	--【PML 语义提醒】handle 覆盖它前面的语句，处理体内只写兜底
+	handle any
+		!txt = ''
+	endhandle
+	if(!txt.unset())then
+		!txt = ''
+	endif
+	if(!txt.length() lt 1)then
+		!txt = !plane.desc
+		if(!txt.unset())then
+			!txt = ''
+		endif
+	endif
+	if(!txt.length() lt 1)then
+		!txt = !plane.name
+		if(!txt.unset())then
+			!txt = ''
+		endif
+	endif
+	return !txt
+endmethod
+--------------------------------------------------------------------------------------
+--按 east 给 GRIDPL 数组排序（E3D 专用：老 .PositionEastSort 比的是 .east，平面没有 posstart/east）
+define method .SortPlaneEast(!planes is array) is array
+	do !i from 1 to !planes.size()
+		do !j from 1 to !planes.size() - !i
+			!k = !j + 1
+			!eastJ = !planes[$!j].pos.wrt(world).east
+			!eastK = !planes[$!k].pos.wrt(world).east
+			if(!eastJ ge !eastK)then
+				!temp = !planes[$!j]
+				!planes[$!j] = !planes[$!k]
+				!planes[$!k] = !temp
+			endif
+		enddo
+	enddo
+	return !planes
+endmethod
+--------------------------------------------------------------------------------------
+--按 north 给 GRIDPL 数组排序（同上）
+define method .SortPlaneNorth(!planes is array) is array
+	do !i from 1 to !planes.size()
+		do !j from 1 to !planes.size() - !i
+			!k = !j + 1
+			!northJ = !planes[$!j].pos.wrt(world).north
+			!northK = !planes[$!k].pos.wrt(world).north
+			if(!northJ ge !northK)then
+				!temp = !planes[$!j]
+				!planes[$!j] = !planes[$!k]
+				!planes[$!k] = !temp
+			endif
+		enddo
+	enddo
+	return !planes
+endmethod
+--------------------------------------------------------------------------------------
+--E3D 版的轴网标注取数：流程与老 .GetGrid() 完全一样（视图范围 → 排序 → 去重 → 4 组 message），
+--   只是"取轴网"换成 GRIDPL、"取坐标"换成 pos.wrt(world)、"取标签"换成 idplane。
+--   位置换算直接复用**老的** .GetGridMessage()（它只用到 message[4..11] 的坐标计算），
+--   拿到结果后把 message[2]（标注文字）换成 idplane。
+--   返回：[1]east [2]west [3]north [4]south（与老 .GetGrid() 同结构，调用方一行都不用改）
+define method .GetGridE3D() is array
+	!view					= !this.view
+	!limitDbelementGet		= object LimitDbelementGet()
+	!limitDbelementGet.view	= !view
+	!volume					= !limitDbelementGet.GetVolume()
+	!eastGrid				= object array()
+	!westGrid				= object array()
+	!northGrid				= object array()
+	!southGrid				= object array()
+	!return					= object array()
+	--===== X 向（GRDAXE = 'X'：平面 east 固定）→ 南 / 北两侧注记 =====
+	!planeX = !this.GetGridPlanesE3D('X')
+	!planeXin = object array()
+	do !i indices !planeX
+		!px = !planeX[$!i].pos.wrt(world)
+		if((!volume.from.east - !px.east) * (!volume.to.east - !px.east) le 0)then
+			!planeXin.append(!planeX[$!i])
+		endif
+	enddo
+	!list = !this.SortPlaneEast(!planeXin)
+	if(!list.size() gt 0)then
+		!interPosition			= !list[1].pos.wrt(world)
+		!interPosition.north	= !volume.from.north
+		!labelType				= !view.owner.owner.name + '/GRIDLABELS/SOUTH'
+		!result = !this.GetGridMessage(!list[1],!interPosition)
+		!result[2] = !this.GridLabelE3D(!list[1])
+		!result[12] = !labelType
+		!southGrid.append(!result)
+		!interPosition.north	= !volume.to.north
+		!labelType				= !view.owner.owner.name + '/GRIDLABELS/NORTH'
+		!result = !this.GetGridMessage(!list[1],!interPosition)
+		!result[2] = !this.GridLabelE3D(!list[1])
+		!result[12] = !labelType
+		!northGrid.append(!result)
+	endif
+	if(!list.size() gt 1)then
+		do !i from 2 to !list.size()
+			!j = !i - 1
+			!posI = !list[$!i].pos.wrt(world)
+			!posJ = !list[$!j].pos.wrt(world)
+			!lblI = !this.GridLabelE3D(!list[$!i])
+			!lblJ = !this.GridLabelE3D(!list[$!j])
+			if(!posI.east eq !posJ.east and !lblI eq !lblJ)then
+				skip
+			else
+				!interPosition			= !list[$!i].pos.wrt(world)
+				!interPosition.north	= !volume.from.north
+				!labelType				= !view.owner.owner.name + '/GRIDLABELS/SOUTH'
+				!result = !this.GetGridMessage(!list[$!i],!interPosition)
+				!result[2] = !this.GridLabelE3D(!list[$!i])
+				!result[12] = !labelType
+				!southGrid.append(!result)
+				!interPosition.north	= !volume.to.north
+				!labelType				= !view.owner.owner.name + '/GRIDLABELS/NORTH'
+				!result = !this.GetGridMessage(!list[$!i],!interPosition)
+				!result[2] = !this.GridLabelE3D(!list[$!i])
+				!result[12] = !labelType
+				!northGrid.append(!result)
+			endif
+		enddo
+	endif
+	--===== Y 向（GRDAXE = 'Y'：平面 north 固定）→ 西 / 东两侧注记 =====
+	!planeY = !this.GetGridPlanesE3D('Y')
+	!planeYin = object array()
+	do !i indices !planeY
+		!py = !planeY[$!i].pos.wrt(world)
+		if((!volume.from.north - !py.north) * (!volume.to.north - !py.north) le 0)then
+			!planeYin.append(!planeY[$!i])
+		endif
+	enddo
+	!list = !this.SortPlaneNorth(!planeYin)
+	if(!list.size() gt 0)then
+		!interPosition			= !list[1].pos.wrt(world)
+		!interPosition.east		= !volume.from.east
+		!labelType				= !view.owner.owner.name + '/GRIDLABELS/WEST'
+		!result = !this.GetGridMessage(!list[1],!interPosition)
+		!result[2] = !this.GridLabelE3D(!list[1])
+		!result[12] = !labelType
+		!westGrid.append(!result)
+		!interPosition.east		= !volume.to.east
+		!labelType				= !view.owner.owner.name + '/GRIDLABELS/EAST'
+		!result = !this.GetGridMessage(!list[1],!interPosition)
+		!result[2] = !this.GridLabelE3D(!list[1])
+		!result[12] = !labelType
+		!eastGrid.append(!result)
+	endif
+	if(!list.size() gt 1)then
+		do !i from 2 to !list.size()
+			!j = !i - 1
+			!posI = !list[$!i].pos.wrt(world)
+			!posJ = !list[$!j].pos.wrt(world)
+			!lblI = !this.GridLabelE3D(!list[$!i])
+			!lblJ = !this.GridLabelE3D(!list[$!j])
+			if(!posI.north eq !posJ.north and !lblI eq !lblJ)then
+				skip
+			else
+				!interPosition			= !list[$!i].pos.wrt(world)
+				!interPosition.east		= !volume.from.east
+				!labelType				= !view.owner.owner.name + '/GRIDLABELS/WEST'
+				!result = !this.GetGridMessage(!list[$!i],!interPosition)
+				!result[2] = !this.GridLabelE3D(!list[$!i])
+				!result[12] = !labelType
+				!westGrid.append(!result)
+				!interPosition.east		= !volume.to.east
+				!labelType				= !view.owner.owner.name + '/GRIDLABELS/EAST'
+				!result = !this.GetGridMessage(!list[$!i],!interPosition)
+				!result[2] = !this.GridLabelE3D(!list[$!i])
+				!result[12] = !labelType
+				!eastGrid.append(!result)
+			endif
+		enddo
+	endif
+	!return[1] = !eastGrid
+	!return[2] = !westGrid
+	!return[3] = !northGrid
+	!return[4] = !southGrid
+	return !return
+endmethod
+--------------------------------------------------------------------------------------
+--E3D 版的轴网中心线：与老 .DrawGridCentrelines() 同一套画法（图层 + VNOTE 锚点 + 贯通 STRAIGHT），
+--   只是取轴网换成 GRIDPL、坐标换成 pos.wrt(world)。线型 / 颜色 / 端点算法与老版逐行一致。
+define method .DrawGridCentrelinesE3D()
+	!view = !this.view
+	!grid = !this.grid
+	if(!view.unset() or !grid.unset())then
+		return
+	endif
+	!limitGet = object LimitDbelementGet()
+	!limitGet.view = !view
+	!volume = !limitGet.GetVolume()
+	!midEast  = (!volume.from.east + !volume.to.east) / 2
+	!midNorth = (!volume.from.north + !volume.to.north) / 2
+	!scale = !view.vscale
+	!cx = !view.xypos.east
+	!cy = !view.xypos.north
+	!halfX = !view.size[1] / 2
+	!halfY = !view.size[2] / 2
+	!halfXNeg = 0 - !halfX
+	!halfYNeg = 0 - !halfY
+	!!ce = !view
+	!layerName = !view.name + '-gridcentrelines'
+	!labelGenerator = object LabelGenerator()
+	!labelGenerator.LayerGenerate(!layerName)
+	NEW VNOTE
+	XYPS X $!cx Y $!cy
+	JUST Left
+	ALIGN Bbody
+	FONT 1
+	BLNK true
+	BMAR 0mm
+	CHEI 2.5mm
+	CSPA 0
+	LSPA 0
+	TXCOLO 2
+	NLSTYL 8004
+	NLCOLO 2
+	FSTYLE Off
+	FCOLOUR 2
+	MSTYLE Off
+	MCOLOUR 2
+	!back = !!ce
+	!drawnE = object array()
+	!cntX = 0
+	!cntY = 0
+	!drawnN = object array()
+	!count = 0
+	-- ===== X 向（GRIDPL，east 固定）→ 竖线（南 → 北）=====
+	!planeX = !this.GetGridPlanesE3D('X')
+	do !i indices !planeX
+		!px = !planeX[$!i].pos.wrt(world)
+		!gx = !px.east
+		if((!volume.from.east - !gx) * (!volume.to.east - !gx) gt 0)then
+			skip
+		endif
+		if(!this.IsGridCoordDrawn(!drawnE,!gx))then
+			skip
+		endif
+		!cntX = !cntX + 1
+		!drawnE.append(!gx)
+		!dx = (!gx - !midEast) * !scale
+		$!back
+		NEW STRAIGHT
+		Fpt Offset X $!dx Y $!halfYNeg
+		Tpt Offset X $!dx Y $!halfY
+		NLSTYL 8004
+		NLCOLO 2
+		!count = !count + 1
+	enddo
+	-- ===== Y 向（GRIDPL，north 固定）→ 横线（西 → 东）=====
+	!planeY = !this.GetGridPlanesE3D('Y')
+	do !i indices !planeY
+		!py = !planeY[$!i].pos.wrt(world)
+		!gy = !py.north
+		if((!volume.from.north - !gy) * (!volume.to.north - !gy) gt 0)then
+			skip
+		endif
+		if(!this.IsGridCoordDrawn(!drawnN,!gy))then
+			skip
+		endif
+		!cntY = !cntY + 1
+		!drawnN.append(!gy)
+		!dy = (!gy - !midNorth) * !scale
+		$!back
+		NEW STRAIGHT
+		Fpt Offset X $!halfXNeg Y $!dy
+		Tpt Offset X $!halfX Y $!dy
+		NLSTYL 8004
+		NLCOLO 2
+		!count = !count + 1
+	enddo
+	$!back
+	!this.centrelineCount = !count
+endmethod
+--------------------------------------------------------------------------------------
+--【23.149 新增 / 23.150 改表·按你的要求】外围标注的避让距离：按"当前标注 / 前一个标注"的类型查表
+--   用它的地方：.SortLabel() 四条边（West/East/North/South）各两处，共 8 处。
+--   !cur  = 正在被推开的那个标注（SortLabel 里的 [!j][1]）
+--   !prev = 相邻的、靠视图中心那一侧已经定位好的标注（[!i][1]）
+--   类型判据取标注的符号库引用名 .tmrf.name（与老代码同一取法）：
+--     '*GRIDLABELS*' → 轴网标注；'*Bbody*' → 不换行版
+--     （DrawingGenerator.GenerateBbodyLabelLib 建的 DIMLABELS/{EAST|WEST|NORTH|SOUTH}-Bbody）；
+--     其余（'*DIMLABELS*'）= 换行版尺寸标注。
+--   表（23.150 你给的新值；注意"当前带不带 Bbody"在**前一个是轴网**时结果不同：12 / 15）：
+--                    前一个 = -Bbody   前一个 = DIMLABELS   前一个 = GRIDLABELS
+--     当前 = -Bbody        5                 7                   12
+--     当前 = DIMLABELS     5                 7                   15
+--     当前 = GRIDLABELS   12                15                   18
+--   ★ 历史值：23.147 之前是"文字含 '*EL.*'（West 边）或 '*#'（East/North/South 边）→ 7，否则 5，
+--     非 DIMLABELS → 10"；23.149 曾用过一套 6/9/10/14/20 的表（当前带不带 Bbody 不分叉），已被本表取代。
+define method .LabelGap(!cur is dbref,!prev is dbref) is real
+	!curName = !cur.tmrf.name
+	!prevName = !prev.tmrf.name
+	!curGrid = !curName.matchwild('*GRIDLABELS*')
+	!curBbody = !curName.matchwild('*Bbody*')
+	!prevGrid = !prevName.matchwild('*GRIDLABELS*')
+	!prevBbody = !prevName.matchwild('*Bbody*')
+	!gap = 7
+	if(!curGrid)then
+		--当前是轴网标注：18 / 12 / 15
+		if(!prevGrid)then
+			!gap = 18
+		elseif(!prevBbody)then
+			!gap = 12
+		else
+			!gap = 15
+		endif
+	else
+		--当前是尺寸标注：前一个是轴网时，当前带 Bbody → 12，不带 → 15；否则 5 / 7
+		if(!prevGrid)then
+			!gap = 15
+			if(!curBbody)then
+				!gap = 12
+			endif
+		elseif(!prevBbody)then
+			!gap = 5
+		else
+			!gap = 7
+		endif
+	endif
+	return !gap
+endmethod
+--------------------------------------------------------------------------------------
+--【23.157 新增·按你的反馈】把标注文字写进"当前标注"（!!ce）—— **安全版**。
+--   背景：原来用命令形式 `ATEXT '$!mess'`，那是把文本**代入命令行再解析**；
+--   本项目管名里有英寸单引号（形如 1/2'SSH900-7X0101-…），代入后会把 PML 字符串截断，
+--   报 `(47,50) CP: Meaningless symbol(s) in command line`（实测 23.157）。
+--   改法：用**对象接口赋值**（RHS 是变量，不经过命令行词法分析），任意字符都能原样写入。
+--   依据：AVEVA 自己的 supports\draft\functions\MdsDetailPlots.pmlfnc:368 `!!ce.atext = !atext`、
+--         MdsAbaLocPlan.pmlfnc:231 `!!ce.atex = !atext` 就是这么写的。
+--   两个属性都设（两套文本 codeword：#ATEXT 与 #ATEX），任一成功即可。
+--   万一某环境下属性不可写：退回命令形式（把 `'` 与 `"` 换成反引号），并打印提示。
+define method .SetSlabText(!mess is string)
+	--【23.162 薄壳】实现已收敛到 TextWriter.WriteSlab（全插件唯一一份三级兜底）。
+	--   保留本方法名：20+ 个调用点一处都不用改。
+	!writer = object TextWriter()
+	!writer.WriteSlab(!mess)
+	endmethod
+--------------------------------------------------------------------------------------
+--【2026-10-31 新增·按你的要求】设备名的四下标注消息（与 GetPipelineMessage 同一数据结构）
+--   [1]元素 [2]文字 [3]边上落点 [4][5]XYPS [6..9]APOF/BPOF [10][11]CPOF [12]SYTM
+--   坐标口径与管道一致：（边上点 - 元素点）× view.vscale + gap×1.5
+define method .GetEquipmentLabels() is array
+	!view = !this.view
+	!ldg = object LimitDbelementGet()
+	!ldg.view = !view
+	!volume = !ldg.GetVolume()
+	--【2026-10-31】**只标注落在 LIMITS 内的设备**。
+	--   GetEquiInView() = DrawList 取 EQUI 后逐台过 IsPointWithinLimit(pos, volume)，
+	--   与 GetEquipment()/GetEquipmentPositions()/GridDataGet 同一口径。
+	!list = !ldg.GetEquiInView()
+	!scale = !view.vscale
+	!drawingName = !view.owner.owner.name
+	!east = object array()
+	!west = object array()
+	!north = object array()
+	!south = object array()
+	do !i indices !list
+		!el = !list[$!i]
+		!p = !el.pos.wrt(world)
+		!dE = !volume.to.east - !p.east
+		!dW = !p.east - !volume.from.east
+		!dN = !volume.to.north - !p.north
+		!dS = !p.north - !volume.from.north
+		!bp = !p
+		!side = 'EAST'
+		!best = !dE
+		if(!dW lt !best)then
+			!best = !dW
+			!side = 'WEST'
+		endif
+		if(!dN lt !best)then
+			!best = !dN
+			!side = 'NORTH'
+		endif
+		if(!dS lt !best)then
+			!best = !dS
+			!side = 'SOUTH'
+		endif
+		if(!side eq 'EAST')then
+			!bp.east = !volume.to.east
+			!gapX = 30
+			!gapY = 0
+		elseif(!side eq 'WEST')then
+			!bp.east = !volume.from.east
+			!gapX = 0 - 30
+			!gapY = 0
+		elseif(!side eq 'NORTH')then
+			!bp.north = !volume.to.north
+			!gapX = 0
+			!gapY = 30
+		else
+			!bp.north = !volume.from.north
+			!gapX = 0
+			!gapY = 0 - 30
+		endif
+		!msg = object array()
+		!msg[1] = !el
+		--【2026-10-31】名字用 .namn（不带路径前缀 / ）；.name 会带 '/'
+		!nm = !el.namn
+		--【2026-10-31】标高带符号：正 → '+' ，负 → '-'，三位小数，如 EL +12.000m / EL -1.200m
+		!elM = !p.up / 1000
+		!elSign = '+'
+		!elAbs = !elM
+		if(!elM lt 0)then
+			!elSign = '-'
+			!elAbs = 0 - !elM
+		endif
+		!elText = !elAbs.string('D3')
+		if(!elText.match(|mm|) gt 0)then
+			!elText = !elText.before('mm')
+		endif
+		if(!nm.unset())then
+			!nm = ''
+		endif
+		!msg[2] = !nm + ' EL ' + !elSign + !elText + 'm'
+		!msg[3] = !bp
+		!pofX = (!bp.east - !p.east) * !scale
+		!pofY = (!bp.north - !p.north) * !scale
+		!msg[4] = !pofX + !gapX * 1.5
+		!msg[5] = !pofY + !gapY * 1.5
+		!msg[6] = !pofX
+		!msg[7] = !pofY
+		!msg[8] = !pofX + !gapX
+		!msg[9] = !pofY + !gapY
+		!msg[10] = 0
+		!msg[11] = 0
+		!msg[12] = !drawingName + '/DIMLABELS/' + !side + '-Bbody'
+		--【2026-10-31】设备名的引线用实线（不设 message[13]，GenerateSytmNote 默认 Solid）
+		if(!side eq 'EAST')then
+			!east.append(!msg)
+		elseif(!side eq 'WEST')then
+			!west.append(!msg)
+		elseif(!side eq 'NORTH')then
+			!north.append(!msg)
+		else
+			!south.append(!msg)
+		endif
+	enddo
+	!ret = object array()
+	!ret[1] = !east
+	!ret[2] = !west
+	!ret[3] = !north
+	!ret[4] = !south
+	return !ret
+endmethod

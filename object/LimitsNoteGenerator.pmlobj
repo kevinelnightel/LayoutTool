@@ -1,0 +1,570 @@
+﻿-- ============================================================================
+-- LimitsNoteGenerator.pmlobj
+-- 视图范围标记 + 北向标放置器
+--
+-- 【本次移植说明】新版 LayoutTool 原先没有这个功能：
+--   · DrawingGenerator.GenerateSylbRule() 已经把北向标符号库
+--     `/<图名>/SYLB` + `/<图名>/SYLB/SYTM` 建好了，但**从来没有把它放到图纸上**；
+--   · 视图四角的"E/N 起止坐标"标注（切图范围标记）也完全没有。
+--   本对象补齐这两块。
+--
+-- 【移植来源】老版 E:\DeepSeek\WorkSpace\PipeLayout\pipelayout.pmlfrm
+--   limitsnote   5750-5885   范围标记主流程（角标 + 文字 + 调用符号库）
+--   sylbrule     4126-4300   北向标符号库（新版已由 DrawingGenerator 实现，本对象只做存在性检查）
+--
+-- 【刻意保留（保证外观与既有图纸一致）】
+--   · 角标几何：45° 短线 Length 14.14、水平/垂直线 Length 25、角点外偏 10mm、
+--     文字与引线在同一 y（x 为 -xsize/2-10-25）；
+--   · 数字格式：object format() 且 dp = 2（两位小数，单位米）；
+--   · 文本内容：'E <fromx> m' / 'N <fromy> m'（左下角）与 'E <tox> m' / 'N <toy> m'（右上角）；
+--   · 角标画在视图坐标系（mm，相对视图中心），数字取自 !view.vvol（模型坐标，÷1000 换算为米）
+--     —— 这两个坐标系不能混用，老版这点是对的，照抄。
+--
+-- 【刻意修正（相对老版，详见 PORTING_LOG.md 第 10 节）】
+--   1. **文字对齐方向**：~~本对象原改为左下 `JUST right`、右上 `JUST left`~~
+--      → **本次已按你的实测要求改回老版**：左下 `JUST left`、右上 `JUST right`。
+--      我原来"老版文字压在引线上"的判断是错的，实测方向以老版为准（见 PORTING_LOG 23.7）。
+--      依据：老版 limitsnote 5828/5838 为 `JUST left`，5871/5881 为 `JUST right`。
+--   2. **北向标位置**：老版写死 `Origin Offset X 480 Y 350`（相对视图中心），只对 A0 图幅成立。
+--      → 本对象按**图幅(Sheet)尺寸**算：默认放在"距图幅右侧 60mm、距上侧 50mm"处
+--        （成员 .insetRight 默认 60 / .insetTop 默认 50；也可用 .symbolX / .symbolY 直接指定插入点）。
+--      ⚠ 另有 50mm 的符号自身偏移：SYMBOL 的可见图形相对插入点朝图幅**外侧**偏 50mm
+--        （新版 SYTM 是 `XYPS X 50mm Y 50mm`、老版是 0/0，实测标定），
+--        故内部按 `.symbolAdjust`（默认 50）把插入点往内让。详见 DrawSymbol 方法头注释
+--        与 PORTING_LOG 23.8 / 23.10。
+--   3. **不再重复创建符号库**：老版 limitsnote 内部又调了一次 sylbrule（重复建库）。
+--      本对象先检查 `/<图名>/SYLB/SYTM` 是否存在，缺失时给出明确状态码
+--      （或在提供了 .sheetSize 时调用 DrawingGenerator.GenerateSylbRule 补建）。
+--   4. **图纸路径取法**：老版用 `name of drwg` 再手工拼 '/LIBY'（缺少前导 '/'，且无 handle）。
+--      本对象改用 `!view.owner.owner` 的 flnn（全限定名，天然带前导 '/'）。
+--   5. 增加状态码与参数校验（非 VIEW / 缺符号库时不再静默失败）。
+-- ============================================================================
+define object LimitsNoteGenerator
+	-- 目标 VIEW（必须）
+	member	.view			is	dbref
+	-- 可选：图幅字符串（如 '1189.00mm 841.00mm'）；提供后可在符号库缺失时自动补建
+	member	.sheetSize		is	string
+	-- 图层名；不设置时按视图名生成
+	member	.layerName		is	string
+	--【报错修复】(2,759) Object does not have a member NOTEPATH
+	--   23.92 的 DrawSymbol 里照抄了表格那句 `!this.notePath = !notePath`，
+	--   但本对象当时**没有声明这个成员** → 运行时报对象没有该成员。这里补上声明。
+	--   存的是北向标容器 NOTE 的绝对路径，便于别处引用/排查。
+	member	.notePath		is	string
+	-- 北向标相对视图中心的 X 偏移(mm)（=**插入点**，会跳过图幅计算；一般不用设）
+	member	.symbolX		is	real
+	-- 北向标相对视图中心的 Y 偏移(mm)（同上）
+	member	.symbolY		is	real
+	-- 北向标：距图幅(Sheet)右边(mm)；不设置时用 .symbolMargin，再默认 60
+	member	.insetRight		is	real
+	-- 北向标：距图幅(Sheet)上边(mm)；不设置时用 .symbolMargin，再默认 50
+	member	.insetTop		is	real
+	-- 北向标边距默认值(mm)（旧名，等价于同时给 insetRight/insetTop 兜底）；不设置时默认 60
+	member	.symbolMargin	is	real
+	-- 符号自身把可见图形相对插入点**外移**的量(mm)：实测 50，插入点按此值往内让
+	member	.symbolAdjust	is	real
+	-- 文字与引线端点的额外间隙(mm)；**默认 0 = 与老版位置完全一致**，>0 时文字各向外让开该值
+	member	.textGap		is	real
+endobject
+------------------------------------------------------------------------------
+-- 主入口：生成范围标记 + 北向标
+--   'OK'      成功
+--   'NOVIEW'  view 未设置或不是 VIEW
+--   'NOSYLB'  北向标符号库 /<图名>/SYLB/SYTM 不存在（且未提供 .sheetSize 无法补建）
+define method .Generate() is string
+	-- 参数校验
+	if(!this.view.unset())then
+		return 'NOVIEW'
+	endif
+	if(!this.view.type ne 'VIEW')then
+		return 'NOVIEW'
+	endif
+	-- 图纸元素：VIEW 的 owner 是 SHEET，SHEET 的 owner 是 DRWG
+	!drwg = !this.view.owner.owner
+	!drwgName = !drwg.flnn
+	-- 【修正】只查用、**不新建**：北向标符号库由出图流程建好
+	-- （DrawingGenerator.Generate → GenerateSylbRule，建在 /<图名>/LIBY/SYLB），
+	-- 这里若再 NEW 会报 (41,12) Name ... already used。
+	-- 依次在候选路径里找 SYTM，找到第一个可用的就用它：
+	--   ① /<图名>/LIBY/SYLB/SYTM   ← 修正后 GenerateSylbRule 建的层级
+	--   ② /<图名>/SYLB/SYTM        ← 既有图纸可能在的层级
+	--   ③ /<图名>/S/LIBY/SYLB/SYTM ← SheetGenerator 建的 SHEET 级 LIBY（备用）
+	-- 【关键修正】路径必须用**绝对路径**：Draft 里 `!drwg.flnn` 返回的名字**可能不带前导 '/'**，
+	-- 之前直接拼出来的是相对路径，`.dbref()` 会以"当前元素"（点按钮时的视图）为基准解析 → 永远找不到。
+	-- 这里统一补上前导 '/'（已有则不重复补）。
+	!drwgPath = !drwg.flnn
+	!hasSlash = false
+	if(!drwgPath.before('/') eq '')then
+		!hasSlash = true
+	endif
+	if(!hasSlash.not())then
+		!drwgPath = '/' + !drwgPath
+	endif
+	!cands = object array()
+	!cands[1] = !drwgPath + '/LIBY/SYLB/SYTM'
+	!cands[2] = !drwgPath + '/SYLB/SYTM'
+	!cands[3] = !drwgPath + '/S/LIBY/SYLB/SYTM'
+	!sytmName = ''
+	!sytmExist = false
+	do !k indices !cands
+		if(!sytmExist)then
+			skip
+		endif
+		!tryName = !cands[$!k]
+		!tryOk = true
+		!tryRef = !tryName.dbref()
+		-- 【PML 语义提醒】handle 覆盖它前面的语句，处理体内只写兜底
+		handle any
+			!tryOk = false
+		endhandle
+		if(!tryOk)then
+			!sytmName = !tryName
+			!sytmExist = true
+		endif
+	enddo
+	if(!sytmExist.not())then
+		-- 【修正】找不到就**新建**为妙？不 —— 按你的要求：不新建，只提示并返回状态码。
+		-- （新建会与出图流程已建好的库撞名，报 (41,12)）
+		return 'NOSYLB'
+	endif
+	-- 图层名
+	if(!this.layerName.unset())then
+		!this.layerName = !this.view.name + '-limitsnote'
+	endif
+	!this.LayerGenerate(!this.layerName)
+	-- 建承载锚点。老版 limitsnote 用**一个**空白 VNOTE 承载全部图元，图元坐标都是
+	-- 相对该 VNOTE 的偏移；该 VNOTE 的位置 = 视图中心在图面上的位置
+	-- （老版 5769-5770：!xcenter = !view.xypos.east.string()）。
+	-- ⚠ 这里不能用 XYPS 0mm 0mm —— 那会落到图幅原点而不是视图中心。
+	!this.CreateAnchor()
+	-- 画
+	--【本次修改·按你的要求】北向标改为"在视图那一层建 NOTE、NOTE 里建 SYMBOL"，
+	--   不再借用 limitsnote 的锚点 VNOTE，所以放在 DrawCorners 之后单独调用。
+	!this.DrawCorners()
+	!this.DrawSymbol(!sytmName)
+	return 'OK'
+endmethod
+------------------------------------------------------------------------------
+-- 建图层（存在则先删后建，保证重复执行不叠加）
+-- 图层命名沿用老版（<视图名>-limitsnote），属性清单与新版其它图层生成方法一致
+define method .LayerGenerate(!name is string)
+	NEW LAYER $!name
+	handle(41,12)
+		!back = !!ce
+		$!name
+		delete LAYER
+		$!back
+		name $!name
+	endhandle
+	UCOD mm  Distance   mm  Bore Nominal
+	FONT 11
+	LTER Off
+	JUST Left
+	ALIGN Bbody
+	DTER Arrows
+	TSIZ 2.5mm
+	CHOS 6mm
+	ASUB 0degree
+	PJUS Towards
+	OSHT 2mm
+	PLCL 0mm
+	DOFF 25mm
+	DMSP 0mm
+	CHEI 2.5mm
+	LLEA true
+	LFRA true
+	LSHA Straight
+	GBOX 1mm
+	CSPA 0
+	LSPA 0
+	LLCL 0mm
+	XYPS 25mm 25mm
+	BPOF 0mm 0mm
+	BLNK true
+	BMAR 0mm
+	FTER Default
+	PCODE mms to 0 dpls  Inches to 1 dpls  Fractions to 32 ths  Angles to 1 dpls
+	NTEXT unset
+	TXCOLO 10
+	NLSTYL Solid
+	NLCOLO 1
+	FSTYLE Off
+	FCOLOUR 1
+	LLSTYL Solid
+	LLCOLO 1
+	LFSTYL Solid
+	LFCOLO 1
+	DLSTYL Solid
+	DLCOLO 10
+	PLSTYL Solid
+	PLCOLO 10
+	MSTYLE Off
+	MCOLOUR 1
+	CHSTYL Off
+	CHCOLO 1
+	POSFOR ENU
+endmethod
+------------------------------------------------------------------------------
+-- 建承载锚点：一个空白 VNOTE，放在"视图中心在图面上的位置"
+-- 后续 DrawSymbol / DrawCorners 都假定当前元素是这个 VNOTE
+-- （取自老版 limitsnote 5769-5788）
+define method .CreateAnchor()
+	!xcenter = !this.view.xypos.east.string()
+	!ycenter = !this.view.xypos.north.string()
+	NEW VNOTE
+	XYPS X $!xcenter Y $!ycenter
+	JUST Left
+	ALIGN Bbody
+	FONT 1
+	BLNK true
+	BMAR 0mm
+	CHEI 2.5mm
+	CSPA 0
+	LSPA 0
+	TXCOLO 10
+	NLSTYL Solid
+	NLCOLO 10
+	FSTYLE Off
+	FCOLOUR 10
+	MSTYLE Off
+	MCOLOUR 10
+endmethod
+------------------------------------------------------------------------------
+-- 北向标：在视图里放一个 SYMBOL 实例，引用符号库里的 SYTM
+--
+-- 【位置规则（按你的要求）】默认放在**图幅(Sheet)** 距右侧 .insetRight、距上侧 .insetTop 处，
+--   右边距默认 60mm、上边距默认 50mm（成员 .symbolMargin 作为旧名兜底，也可用 .symbolX/.symbolY 直接指定）。
+--   坐标系相关的三个事实，均已在本插件现有代码里核实：
+--     ① Draft 图幅坐标原点在**图纸左下角**，X 向右、Y 向上；
+--     ② 建 VIEW 时 `XYPS` 给的是**视图中心**在图幅上的位置
+--        （form/.MethodSetDrawingSize 1374-1377：viewPositionX = 图幅宽/2，Y = 图幅高/2，
+--         即默认视图正好在图幅正中；SheetGenerator.GenerateView 58-59 用 SIZE + XYPS 建视图）；
+--     ③ 锚点 VNOTE 的 XYPS = view.xypos（老版 limitsnote 5769-5770 同此），
+--        而 SYMBOL 的 Origin Offset 是**相对该锚点**的偏移。
+--   于是目标位置（相对锚点 = 视图中心）：
+--     目标 X = (图幅宽 - insetRight) - view.xypos.east - symbolAdjust
+--     目标 Y = (图幅高 - insetTop  ) - view.xypos.north - symbolAdjust
+--
+-- 【symbolAdjust：实测标定值，替代上一版"读库里 SYTM 的 XYPS"】
+--   经过两轮实测把这件事定下来了（过程见 PORTING_LOG 23.8 → 23.10）：
+--     · 第一版（无任何补偿）：你反馈"太靠近图面中心"；
+--     · 第二版（读 SYTM 的 XYPS 并**加到**插入点上）：你实测"距右侧 0mm" ← 决定性数据。
+--   这条实测说明：可见图形相对插入点是**朝图幅外侧**偏移的，净偏移量 50mm
+--   （不论读到的 XYPS 是 50 还是读取失败退化成 0，实测净效果一致）。
+--   旧版 SYTM 的 XYPS 是 0/0（pipelayout.pmlfrm 4148），新版 GenerateSylbRule 写的是
+--   `XYPS X 50mm Y 50mm`（DrawingGenerator.pmlobj 502），差异来源就在这里。
+--   现在把它做成**显式常量**：插入点 = 目标可见位置 − .symbolAdjust（默认 50）。
+--   好处：insetRight/insetTop 的含义变成"你量到的、图形到图幅边的距离"，可核对、可复现；
+--   若以后库里的 SYTM 换成 XYPS 0/0（例如按老版重建），把 .symbolAdjust 设成 0 即可。
+--   （显式给了 .symbolX/.symbolY 时，认为你给的就是插入点本身，不再减这个值。）
+define method .DrawSymbol(!sytmName is string)
+	!view	= !this.view
+	-- 距视图右上角的距离(mm)：右 60 / 上 50
+	--   （.symbolMargin 若被显式设置仍是"右/上同值"的旧语义，优先生效）
+	!defIns	= !this.symbolMargin
+	if(!defIns.unset())then
+		!defIns = 130        $*【本次修改·按你的反馈】距**图幅右边**默认 130mm（100 仍会压到表格）
+	endif
+	!defInsTop	= !this.symbolMargin
+	if(!defInsTop.unset())then
+		!defInsTop = 50
+	endif
+	!insR	= !this.insetRight
+	if(!insR.unset())then
+		!insR = !defIns
+	endif
+	!insT	= !this.insetTop
+	if(!insT.unset())then
+		!insT = !defInsTop
+	endif
+	-- SYTM 的可见图形相对插入点朝外侧偏 .symbolAdjust（默认 50，实测标定，见文件头 23.8/23.10 的说明）
+	!adjX	= !this.symbolAdjust
+	!adjY	= !this.symbolAdjust
+	if(!adjX.unset())then
+		!adjX = 50
+	endif
+	if(!adjY.unset())then
+		!adjY = 50
+	endif
+	--【本次修改·按你的反馈】位置基准回到**图幅(Sheet)**：
+	--   23.92 一度把它改成视图右上角内侧，结果北向标压在图面上（你实测反馈）。
+	--   你要的位置是图幅右上角那一片空区：距上边约 50mm、距右边约 100mm。
+	--   坐标系：Draft 图幅原点在图纸左下角；本方法的容器 NOTE 没有设 XYPS（与表格同做法），
+	--   所以下面算出的插入点就是**图幅绝对坐标**，直接喂给 SYMBOL 的 Origin Offset。
+	-- 图幅尺寸：form 传 .sheetSize，形如 '1189.00mm 841.00mm'（解析写法与 form 一致）
+	!sheetW	= 0
+	!sheetH	= 0
+	!ss	= !this.sheetSize
+	if(!ss.unset().not())then
+		!sheetW = !ss.before(' ').real()
+		!sheetH = !ss.after(' ').real()
+		handle any
+			!sheetW = 0
+			!sheetH = 0
+		endhandle
+	endif
+	!frameRef = 'SHEET'
+	if(!sheetW gt 0)then
+		!tx = (!sheetW - !insR) - !adjX
+		!ty = (!sheetH - !insT) - !adjY
+	else
+		-- 图幅字符串缺失或解析失败 → 退回按视图右上角内侧算，至少不会跑到图幅外
+		!frameRef = 'VIEW'
+		!tx = !view.xypos.east  + !view.size[1] / 2 - !insR - !adjX
+		!ty = !view.xypos.north + !view.size[2] / 2 - !insT - !adjY
+	endif
+	--【报错修复】这里原来残留了一行旧的 `!ty = !viewTop - !insT - !adjY`：
+	--   改回图幅基准时 viewTop 的定义已删掉，留着它会报 (2,751) Variable !VIEWTOP does not exist。
+	!sx	= !tx
+	!sy	= !ty
+	!usrX	= !this.symbolX
+	!usrY	= !this.symbolY
+	if(!usrX.unset().not())then
+		!sx = !usrX
+	endif
+	if(!usrY.unset().not())then
+		!sy = !usrY
+	endif
+	-- 容器：与表格同一个做法 —— 在**视图那一层**建一个以视图全名命名的 NOTE，
+	--   北向标的 SYMBOL 建在这个 NOTE 里（不再是 limitsnote 图层里那个匿名 VNOTE）。
+	--   · 名字用绝对路径（本工程 view.name 本身带前导 '/'，只在缺的时候补一个，避免拼出 '//'）；
+	--   · 同名元素已存在时先删后建（旧版本留下的可能是 LAYE），重复出图不叠加；
+	--   · NOTE 上**不写任何属性**：实测在这套环境里 NOTE 级属性会抛 (2,779)，
+	--     且对子图元外观无影响（SYMBOL 自己带定位），详见 GridGenerator.NoteGenerate 的说明。
+	!noteName	= !view.name + '-northarrow'
+	!notePath	= !noteName
+	!hasSlash	= false
+	if(!notePath.before('/') eq '')then
+		!hasSlash = true
+	endif
+	if(!hasSlash.not())then
+		!notePath = '/' + !notePath
+	endif
+	!this.notePath = !notePath
+	NEW NOTE $!notePath
+	handle(41,12)
+		!back = !!ce
+		$!notePath
+		!oldType = !!ce.type
+		if(!oldType.match(|NOTE|) gt 0)then
+			delete NOTE
+		elseif(!oldType.match(|LAYE|) gt 0)then
+			delete LAYE
+		endif
+		$!back
+		NEW NOTE $!notePath
+	endhandle
+	-- 在这个 NOTE 里建 SYMBOL，引用符号库 /<图名>/LIBY/SYLB/SYTM
+	--   NOTE 自身没有设 XYPS（与表格的容器一样），所以下面的 Offset 是**图幅绝对坐标**。
+	!backNote = !!ce
+	$!notePath
+	NEW SYMBOL
+	Origin Offset X $!sx Y $!sy
+	TMRF SYTM $!sytmName
+	$!backNote
+endmethod
+------------------------------------------------------------------------------
+-- 视图四角的"范围标记"：
+--   左下角画一组 45° 折线 + 水平引线，标出切图范围的西/南坐标（米）；
+--   右上角对称，标出东/北坐标。
+-- 全部几何与文字对齐均取自老版 limitsnote 5796-5884，未做任何"修正"
+define method .DrawCorners()
+	!view	= !this.view
+	!xsize	= !view.size[1]
+	!ysize	= !view.size[2]
+	-- 文字与引线端点的额外间隙(mm)；默认 0 = 与老版完全一致
+	--   老版文字 x 就是 `±(xsize/2 + 10 + 25)`，没有额外间隙；
+	--   上一版我默认给了 2mm，会让文字比老版多偏 2mm，已改回 0（见 PORTING_LOG 23.7）。
+	--   如确需离开引线一点，用成员 .textGap 单独覆盖即可。
+	!gap	= !this.textGap
+	if(!gap.unset())then
+		!gap = 0
+	endif
+	-- 老版硬编码的三个尺寸
+	!off10	= 10
+	!lead	= 25
+	!tick	= 14.14
+	-- 数字格式：两位小数（老版 object format() + dp=2）
+	!format = object format()
+	!format.dp = 2
+	-- 视图范围（模型坐标 → 米）：vvol = [西,南,下,东,北,上]
+	-- 注意：必须"先算数、再转字符串"两步走。PML 不允许在括号表达式后面直接
+	-- 调用方法（写 `(!a / 1000).string(...)` 会报 (47,15) CP: Syntax error），
+	-- 老版 limitsnote 5805-5808 / 5849-5852 就是这么分两步写的，此处照搬。
+	--【本次修正·按你的报错】(64,443) Invalid limits caused by incompatible section planes
+	--   现象：`!view.vvol[1]` 抛 (64,443) —— PDMS 在**求解"视图体积"**时发现该视图的截面
+	--   （VSEC）互相不兼容（例如只有一侧截面、或两截面方向/位置互相矛盾、或视图没随设计更新），
+	--   于是整个"范围标记"步骤中断，四角标记一个都画不出来。
+	--   这个属性是 PDMS 自己算的，无法保证任何一张图都算得出来，所以改成两步：
+	--     ① 先试 vvol（PDMS 口径，能算出来就用它）；
+	--     ② 取不到就**自己按视图截面位置算** —— 口径与 LimitDbelementGet.GetVolume()
+	--        （drawlist 过滤、尺寸标注用的同一个体积）完全一致，不依赖 PDMS 的体积求解，
+	--        因此不会再抛 (64,443)。
+	--   handle 语义：要保护的语句写在 handle **前面**，块里只写兜底。
+	!fromxpos = 0
+	!fromypos = 0
+	!toxpos = 0
+	!toypos = 0
+	--【23.160 修正·handle 后置绑定】原来这里是 4 条 vvol 读取、handle 只挂在**最后一条**上：
+	--   若 vvol[1] 先抛错（正是上面说的 (64,443)），整个方法直接中断，
+	--   !volOk 根本轮不到被置 false → ①②两步兜底全部失效 → 四角标记一个都画不出来。
+	--   现在把 4 条读取整块抽成 .ReadViewVolume()（整块 = 一次调用），handle 紧跟这次调用，
+	--   任意一条抛错都能落到兜底分支。
+	!volOk = true
+	!vol4 = !this.ReadViewVolume(!view)
+	handle any
+		!volOk = false
+	endhandle
+	if(!volOk)then
+		!fromxpos = !vol4[1]
+		!fromypos = !vol4[2]
+		!toxpos   = !vol4[3]
+		!toypos   = !vol4[4]
+	endif
+	-- ② 兜底：按视图截面自己算（单独保护，失败就跳过四角标记，不影响北向标等其它图元）
+	--   同样抽成 .ReadSectionVolume()，handle 挂在那次调用后面。
+	!secOk = true
+	if(!volOk.not())then
+		!vol4 = !this.ReadSectionVolume(!view)
+		handle any
+			!secOk = false
+		endhandle
+	endif
+	--【PML 语义提醒】组合条件（and/or）在同样的数据上会走不同分支（23.143 的教训），
+	--   这里拆成两层 if，语义一目了然：视图体积取不到 且 截面口径取到了 → 用截面口径。
+	if(!volOk.not())then
+		if(!secOk)then
+			!fromxpos = !vol4[1]
+			!fromypos = !vol4[2]
+			!toxpos   = !vol4[3]
+			!toypos   = !vol4[4]
+		endif
+	endif
+	if(!volOk.not() and !secOk.not())then
+		$p Range marks skipped - view volume and section planes both unavailable.
+		return
+	endif
+	if(!volOk.not())then
+		$p Range mark coordinates taken from the view section planes (view volume unavailable).
+	endif
+	!fromx = !fromxpos.string(!format)
+	!fromy = !fromypos.string(!format)
+	!tox   = !toxpos.string(!format)
+	!toy   = !toypos.string(!format)
+	-- 视图坐标系下的关键点位
+	!lbx	= - !xsize / 2					$* 左下角
+	!lby	= - !ysize / 2
+	!lbstrax= - !xsize / 2 - !off10
+	!lstray	= - !ysize / 2 - !off10
+	!lbtextx= - !xsize / 2 - !off10 - !lead - !gap
+	!lbtexty= - !ysize / 2 - !off10
+	!rtx	= !xsize / 2					$* 右上角
+	!rty	= !ysize / 2
+	!rtstrax= !xsize / 2 + !off10
+	!rtstray= !ysize / 2 + !off10
+	!rttextx= !xsize / 2 + !off10 + !lead + !gap
+	!rttexty= !ysize / 2 + !off10
+	-- 承载图元（锚点 VNOTE 由 Generate() 的 CreateAnchor() 建好，本方法不建 VNOTE）
+	-- ===== 左下角 =====
+	NEW STRAIGHT
+	Fpt Offset X $!lbx  Y $!lby
+	Adegrees 225
+	Length 14.14
+	NLSTYL 8001
+	NLCOLO 10
+	NEW STRAIGHT
+	Fpt Offset X $!lbstrax  Y $!lstray
+	Adegrees 180
+	Length 25
+	NLSTYL 8001
+	NLCOLO 10
+	-- 西坐标：JUST left
+	--   【已恢复老版方向】我原先"修正"成 JUST right，你实测方向不对，现改回。
+	--   依据：老版 limitsnote 5828 与 5838 —— 左下角两行文字都是 JUST left。
+	NEW TEXTPRIMITIVE
+	Origin Offset X $!lbtextx  Y $!lbtexty
+	FONT 1
+	CHEI 2.5mm
+	CSPA 0
+	LSPA 0
+	JUST left
+	ALIGN Bbody
+	BTEX 'E $!fromx m'
+	TXCOLO 10
+	-- 南坐标：JUST left（同上，与老版一致）
+	NEW TEXTPRIMITIVE
+	Origin Offset X $!lbtextx  Y $!lbtexty
+	FONT 1
+	CHEI 2.5mm
+	CSPA 0
+	LSPA 0
+	JUST left
+	ALIGN tbody
+	BTEX 'N $!fromy m'
+	TXCOLO 10
+	-- ===== 右上角 =====
+	NEW STRAIGHT
+	Fpt Offset X $!rtx  Y $!rty
+	Adegrees 45
+	Length 14.14
+	NLSTYL 8001
+	NLCOLO 10
+	NEW STRAIGHT
+	Fpt Offset X $!rtstrax  Y $!rtstray
+	Adegrees 0
+	Length 25
+	NLSTYL 8001
+	NLCOLO 10
+	-- 东坐标：JUST right
+	--   【已恢复老版方向】我原先"修正"成 JUST left，你实测方向不对，现改回。
+	--   依据：老版 limitsnote 5871 与 5881 —— 右上角两行文字都是 JUST right。
+	NEW TEXTPRIMITIVE
+	Origin Offset X $!rttextx  Y $!rttexty
+	FONT 1
+	CHEI 2.5mm
+	CSPA 0
+	LSPA 0
+	JUST right
+	ALIGN Bbody
+	BTEX 'E $!tox m'
+	TXCOLO 10
+	-- 北坐标：JUST right（同上，与老版一致）
+	NEW TEXTPRIMITIVE
+	Origin Offset X $!rttextx  Y $!rttexty
+	FONT 1
+	CHEI 2.5mm
+	CSPA 0
+	LSPA 0
+	JUST right
+	ALIGN tbody
+	BTEX 'N $!toy m'
+	TXCOLO 10
+endmethod
+------------------------------------------------------------------------------
+--【23.160 新增】读取视图体积（PDMS 口径），返回 [fromx, fromy, tox, toy]（米）。
+--   为什么单独抽一个方法：4 条 vvol 读取里任意一条都可能抛 (64,443)，
+--   而 handle 只能兜住"紧邻它前面那一条命令"。抽成方法之后，
+--   调用方拿到的是一次调用，一次 handle 就能覆盖全部 4 条。
+define method .ReadViewVolume(!view is dbref) is array
+	!r = object array()
+	!r[1] = !view.vvol[1] / 1000
+	!r[2] = !view.vvol[2] / 1000
+	!r[3] = !view.vvol[4] / 1000
+	!r[4] = !view.vvol[5] / 1000
+	return !r
+endmethod
+------------------------------------------------------------------------------
+--【23.160 新增】按视图截面自己算体积（不依赖 PDMS 体积求解），
+--   口径与 LimitDbelementGet.GetVolume() 一致，返回 [fromx, fromy, tox, toy]（米）。
+define method .ReadSectionVolume(!view is dbref) is array
+	!limitGet = object LimitDbelementGet()
+	!limitGet.view = !view
+	!vol = !limitGet.GetVolume()
+	!r = object array()
+	!r[1] = !vol.from.east / 1000
+	!r[2] = !vol.from.north / 1000
+	!r[3] = !vol.to.east / 1000
+	!r[4] = !vol.to.north / 1000
+	return !r
+endmethod
+------------------------------------------------------------------------------

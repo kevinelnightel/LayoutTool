@@ -1,0 +1,1877 @@
+﻿------------------------------------------------------------------
+$(
+--	作者：		LayoutTool contributors
+--	描述：		用于生成平面图
+--	创建日期：	2026/07/13
+--	更新日志：	
+					
+$)						
+------------------------------------------------------------------------
+Import 'pmlfilebrowser'
+handle any
+endhandle
+setup form !!LayoutToolMain 
+title 'Layout Tool'
+	member	.memberViewList is array
+	member	.memberViewConfig is ViewConfig
+	
+	--
+	frame	.tabset		Tabset		|tabset|		anchor all		at		x0		y0
+		--------------------------------------------------------------------------
+		--图纸范围配置界面
+		frame				.frameConfig					|Config|											at			x0				y0
+			frame			.frameLimitsConfig				|View Config|					anchor l+t+b		at			x0				ymax
+				--Drawlist配置
+				frame		.frameDrawlistConfig			|Drawlist Config|				anchor l+t+b		at			x0				ymax
+					button		.btnAddDrawListMember		|AddCE|												at			x0				ymax			width 6
+					button		.btnClearDrawListMember		|ClearCE|											at			xmax+0.5		ymin			width 6
+					button		.btnClearDrawListAll		|ClearAll|											at			xmax+0.5		ymin			width 6
+					list		.listDrawList				|AddList|						anchor l+t			at			x0				ymax+0.1		width 22		height 11
+					button		.btnAddRemoveListMember		|AddCE|												at			x0				ymax+0.4		width 6
+					button		.btnClearRemoveListMember	|ClearCE|											at			xmax+0.5		ymin			width 6
+					button		.btnClearRemoveListAll		|ClearAll|											at			xmax+0.5		ymin			width 6
+					list		.listRemoveList				|RemoveList|					anchor l+t+b		at			x0				ymax+0.1		width 22		height 11
+				exit
+				--View配置
+				frame		.frameViewConfig				|Limit Config|					anchor all			at			xmax+0.5			ymin
+					button		.btnCurrentScope			|CE|												at			x0					ymax			width 6
+					button		.btnDrawlistScope			|DrawList|											at			xmax+0.5			ymin			width 6
+					button		.btnPickLimit				|Pick|												at			xmax+0.5			ymin			width 6
+					button		.btnClipView				|Clip|												at			xmax+0.5			ymin			width 6
+					button		.buttonGrid					|GRID|												at			x0					ymax+0.1		width 6
+					text		.textGrid																		at			xmax+1				ymin			width 20		is string
+					
+					line		.lineScope																		at			x0				ymax+0.2		horiz			width 30	hei 0
+					text		.textLimitValue				|Distance|		tagwidth 8		 anchor l+r+t		at			x0				ymax+0.2		width 13		is real
+					button		.btnLimitValue				|+|													at			xmax+0.5		ymin			width 5
+					paragraph	.paragraphFrom																	at			x0				ymax			text			|From|
+					paragraph	.paragraphTo																	at			xmax.paragraphFrom+12.5			ymin			text			| To |
+					text		.textFromEast				|East|			tagwidth 4							at			x0				ymax			width 7		is real
+					button		.btnFromEastAddSub			|+|													at			xmax+0.5			ymin			width 1.5
+					text		.textToEast					|East|			tagwidth 4							at			xmax.textFromEast+3				ymin			width 7		is real
+					button		.btnToEastAddSub			|+|													at			xmax+0.5			ymin			width 1.5
+					text		.textFromNorth				|North|			tagwidth 4							at			x0				ymax+0.1		width 7		is real
+					button		.btnFromNorthAddSub			|+|													at			xmax+0.5			ymin			width 1.5
+					text		.textToNorth				|North|			tagwidth 4							at			xmax.textFromNorth+3				ymin			width 7		is real
+					button		.btnToNorthAddSub			|+|													at			xmax+0.5			ymin			width 1.5
+					text		.textFromUp					| Up |			tagwidth 4							at			x0				ymax+0.1		width 7		is real
+					button		.btnFromUpAddSub			|+|													at			xmax+0.5			ymin			width 1.5
+					text		.textToUp					| Up |			tagwidth 4							at			xmax.textFromUp+3				ymin			width 7		is real
+					button		.btnToUpAddSub				|+|													at			xmax+0.5			ymin			width 1.5
+					
+				exit
+				
+				frame	.frameDrawingSetting			|Drawing Setting|			anchor l+r+t				at			xMAX.frameDrawlistConfig+0.5				ymax+0.5
+					--【本次新增·按你的要求】图纸种类选项：
+					--   General / PipeLayout / EquiLayout / InstLayout /
+					--   NozzleLayout(Vertical) / NozzleLayout(Horizontal)
+					--   后两项是管口方位图：Vertical 走立式设备那一套、Horizontal 走卧式设备那一套。
+					--   【宽度 = 17】按你的要求比 Name（19）再短 2 个单位；
+					--   收起时超长的选项文字会被截断，展开列表里仍是完整文字。
+					--   本控件排在 Name 行之前（表单按定义顺序自下往上排布）。
+					option		.optionLayoutKind		|LayoutType|				tagwidth 10		at			x0				ymax+0.2		width 17
+					text		.textDrawingName		|Name|	tagwidth 10		 anchor l+r+t		at			x0				ymax+0.2		width 19		is string
+					--【本次新增·按你的要求】相对标高(mm)：本插件里所有"标高"的计算都要减去它 ——
+					--   支架表标高、管线表 BOP、仪表表标高、设备 EL 标注、管道 BOP EL 标注。
+					--   数值单位与模型坐标一致，是 **mm**（显示成 m 是各处在 ÷1000 时换的）。
+					--   留空或填 0 = 不减（与以前一致）。统一读取见 .RelativeElevation()。
+					text		.textRelativeElev		|Relative(mm)|	tagwidth 12		 anchor l+r+t		at			x0				ymax+0.2		width 19		is real
+					
+					option		.optionDrawingSize		|Size|				tagwidth 5		at			x0				ymax+0.1		width 4
+					text		.textDrawingSize											at			xmax+0.5		ymin			width 16		is string
+				exit
+				
+				frame	.frameViewSetting				|View Setting|			anchor l+r+t					at			xMAX.frameDrawlistConfig+0.5				ymax+0.3
+					--view的比例设置
+					paragraph	.paragraphScale														at			x0				ymax+0.1		text			|Scale|			width 6
+					text		.textScale				|1:|						tagwidth 2		at			xmax+1			ymin			width 5		is real
+					button		.btnNear				|Near|										at			xmax+0.5			ymin			width 6
+					button		.btnReSize				|ReSize|									at			xmax+0.5			ymin			width 6
+					--view的位置设置
+					paragraph	.paragraphViewPosition												at			x0				ymax+0.1		text			|Position|		width 6
+					text		.textViewPositionX		|X:|						tagwidth 2		at			xmax+1			ymin			width 8			is real
+					text		.textViewPositionY		|Y:|						tagwidth 2		at			xmax+0.5		ymin			width 8			is real
+					
+					--view的消隐模式及方向
+					option		.optionViewType			|Type|						tagwidth 9		at			x0				ymax+0.2		width 18
+					option		.optionDirection		|Direction|					tagwidth 9		at			x0				ymax+0.2		width 18
+					
+					paragraph	.paragraphViewSize													at			x0				ymax+0.1		text			|Size|		width 6
+					text		.textViewSizeX			|X:|						tagwidth 2		at			xmax+1			ymin			width 8		is real
+					text		.textViewSizeY			|Y:|						tagwidth 2		at			xmax+0.5		ymin			width 8		is real
+				exit
+			exit
+			
+			--Drawing的设置
+			frame		.frameDrawingConfig				|Drawing Config|							at			xmax+1				y0
+				button		.btnSaveView				|SaveView|									at			x0			ymax			width 7 height 1.1
+				button		.btnUpdateViewSetting		|Update|									at			xmax+1			ymin		width 7 height 1.1
+				button		.btnCopyView				|Copy|										at			xmax+1			ymin		width 7 height 1.1
+				--view的设置
+				line		.lineViewList																	at			x0				ymax+0.2			horiz			width 25	hei 0
+				button		.btnClearAllAid				|ClearAid|											at			x0				ymax+0.2		width 6
+				button		.btnRemoveViewLimt			|Remove|											at			xmax+1			ymin			width 6
+				button		.btnRemoveAllViewLimt		|ClearAll|											at			xmax+1			ymin			width 6
+				list		.listViewList				|ViewList|						anchor all			at			x0				ymax+0.3		width 24		height 17
+				
+				frame		.frameSavePath						|Save Path|								at			x0				ymax+0.2
+					text			.textDrawlistConfig											anchor l+r+b		at			x0				ymax+0.2		width 24		is string
+					button			.btnOpenDrawlistFile		|Brower...|						anchor l+b			at			x0				ymax+0.2		width 7
+					button			.btnExportDrawlistFile		|Export|						anchor l+b			at			xmax+0.5			ymin			width 7
+					button			.btnLoadDrawlistFile		|Load|							anchor l+b			at			xmax+0.5			ymin			width 7
+				exit
+				button		.buttonRegi				|REGI|								at			x0				ymax+0.1		width 4
+				text		.textRegi													at			xmax+1			ymin			width 19		is string
+				button		.btnGenerateView		|Generate|									at			x0			ymax+0.3			width 7		heig 1.2
+				button		.btnColseForm			|Close|										at			xmax+1		ymin			width 7		heig 1.2	call		|kill _LayoutToolMain|
+			exit
+		exit
+		--【本次修改·按你的要求】Tables 页（表格输出 + 各表原点/相对标高输入框）已整页删掉：
+		--   表格现在由 Generate 流程自动出（MethodAutoTables：EquiLayout→设备表 / InstLayout→仪表表 /
+		--   其它图种→支架表+管线表），原点也不再需要手填 —— 见 TableOrigin()：按当前图幅现算。
+		--   需要单独出一张表时，命令行/宏仍可用老同名入口：
+		--   !LayoutToolMain.suppgrid() / pipegrid() / minstgrid() / mnozzlegrid()
+		---------------------------------------------------------------------------
+		--【本次修改】"图面注记页（Limits）"整页已按你的要求去掉：
+		--   · 范围标记 + 北向标现在并入"生成图纸"流程（见 .MethodGenerateView() 里的
+		--     !this.MethodLimitsNoteFor(!view)），不再需要单独点按钮；
+		--   · 命令行/宏仍可用 !LayoutToolMain.MethodGenerateLimitsNote() 单独执行一次。
+		-- 【注意】删掉 frame 的同时必须删掉它的按钮回调赋值（!this.btnLimitsNote.callback），
+		--   否则表单初始化时会报 (2,759) member BTNLIMITSNOTE not found。
+		---------------------------------------------------------------------------
+		--【本次移植新增】图纸导出页：DXF / DWG 批量导出
+		-- 来源：老版 pipelayout.pmlfrm 的 "Export Draw" 页
+		--      （madddraw/mcleardraw/mexport/drawingset 5889-5981）
+		frame		.frameExport		|Export|					anchor all		at			x0				y0
+			--【2026-10-31·按你的要求】全部相对定位（Config 页的写法）：第一个子框 x0 ymax，
+			--   后面的一律 xMax.<前一个子框>+1 ymin；不再用具体数值。
+			frame		.frameTables	|Tables|					anchor l+t+b		at			x0				ymin
+				frame		.framePipeTable	|Pipe|					anchor l+t+b		at			x0				ymin
+					button		.btnPipeTableRegen	|Regen|							at			xmax+0.5		ymin	width 6	call		|!this.RegenPrimaryTable()|
+					text		.textPipeTableX	|xPos|		tagwidth 5		at			x0				ymax+0.1	width 6	is real
+					text		.textPipeTableY	|yPos|		tagwidth 5		at			xmax+0.5		ymin	width 6	is real
+					list		.listPipeTable		|Pipe List|							anchor all			at			x0				ymax+0.1	width 24	height 12
+				exit
+				frame		.frameSuppTable	|Supp|					anchor l+t+b		at			xMax.framePipeTable+1		ymin
+					button		.btnSuppTableRegen	|Regen|							at			xmax+0.5		ymin	width 6	call		|!this.suppgrid()|
+					text		.textSuppTableX	|xPos|		tagwidth 5		at			x0				ymax+0.1	width 6	is real
+					text		.textSuppTableY	|yPos|		tagwidth 5		at			xmax+0.5		ymin	width 6	is real
+					list		.listSuppTable		|Supp List|							anchor all			at			x0				ymax+0.1	width 24	height 12
+				exit
+			exit
+			frame		.frameExportOut	|Export|					anchor all			at			xMax.frameTables+1		ymin
+				text		.textExportPath	|Save Path|	tagwidth 9		anchor l+t		at			x0				ymax+0.3	width 18	is string
+				!this.textExportPath.val = 'D:\DRAW'
+				option		.optionExportFormat	|Format|	tagwidth 7	anchor l+t		at			x0				ymax+0.1	width 10
+				button		.btnAddSheet	|AddDraw|					anchor l+t		at			x0				ymax+0.2	width 8
+				button		.btnClearSheet	|ClearSel.|					anchor l+t		at			xmax+0.5		ymin	width 9
+				button		.btnClearAllSheet	|ClearAll|					anchor l+t		at			xmax+0.5		ymin	width 8
+				button		.btnExportDraw	|Export|					anchor l+t		at			x0				ymax+0.2	width 8
+				list		.listSheet		|Sheet List|				anchor all			at			x0				ymax+0.2	width 26	height 10
+			exit
+			exit
+		--【本次修改·按你的要求】Batch 页（批量出图 + 接图号）已整页删掉，相关方法一并取消。
+		---------------------------------------------------------------------------
+		--【本次修改·按你的要求】Drawing Config 这一页已去掉：它里面只有一个 Test 按钮，没有别的控件；
+		--   Test 的功能（对当前视图重跑一遍标注）早已并入 Generate 流程 ——
+		--   见 .MethodGenerateView()：建完图后紧接着跑同一套标注（标签/设备注释/尺寸/范围标记/出表）。
+		-- 【注意】删掉 frame 的同时必须删掉 .btnTest 的回调赋值（!this.btnTest.callback）与
+		--   .MethodTest() 方法本身，否则表单初始化会报 (2,759) member BTNTEST not found。
+	exit		
+exit
+---------------------------------------------------------------------------
+--构造函数，加载窗口时初始化参数
+define method .LayoutToolMain()
+	---------------------------------------------------------------------------
+	--按钮颜色
+	!this.btnAddDrawListMember.Background		=		6
+	!this.btnAddRemoveListMember.Background	=		6
+	!this.btnCurrentScope.Background			=		6
+	!this.buttonGrid.Background			=		6
+	!this.btnNear.Background			=		6
+	!this.btnReSize.Background			=		6
+	!this.btnSaveView.Background			=		6
+	!this.btnUpdateViewSetting.Background			=		6
+	!this.btnCopyView.Background			=		6
+	!this.btnGenerateView.Background			=		4
+	---------------------------------------------------------------------------
+	--第一个Frame初始化
+	!this.btnAddDrawListMember.callback			=		|!this.MethodAddDrawListMember()|
+	!this.btnClearDrawListMember.callback		=		|!this.MethodClearDrawListMember()|
+	!this.btnClearDrawListAll.callback			=		|!this.MethodClearDrawListAll()|
+	
+	!this.btnAddRemoveListMember.callback		=		|!this.MethodAddRemoveListMember()|
+	!this.btnClearRemoveListMember.callback		=		|!this.MethodClearRemoveListMember()|
+	!this.btnClearRemoveListAll.callback		=		|!this.MethodClearRemoveListAll()|
+	
+	
+	---------------------------------------------------------------------------
+	--第二个Frame初始化
+	!this.btnCurrentScope.callback				=		|!this.MethodCurrentScope()|
+	!this.btnDrawlistScope.callback				=		|!this.MethodDrawlistScope()|	
+	!this.btnPickLimit.callback					=		|!this.MethodPickLimit()|
+	!this.btnSaveView.callback					=		|!this.MethodSaveView()|
+	!this.btnClipView.callback					=		|!this.MethodClipView()|
+	!this.buttonGrid.callback					=		|!this.MethodGrid()|
+
+	!this.btnLimitValue.callback				=		|!this.MethodLimitValue()|
+	!this.btnFromEastAddSub.callback			=		|!this.MethodAddSubValue('FromEast')|
+	!this.btnFromNorthAddSub.callback			=		|!this.MethodAddSubValue('FromNorth')|
+	!this.btnFromUpAddSub.callback				=		|!this.MethodAddSubValue('FromUp')|
+	!this.btnToEastAddSub.callback				=		|!this.MethodAddSubValue('ToEast')|
+	!this.btnToNorthAddSub.callback				=		|!this.MethodAddSubValue('ToNorth')|
+	!this.btnToUpAddSub.callback				=		|!this.MethodAddSubValue('ToUp')|
+
+	!this.btnClearAllAid.callback				=		|aid clear all|
+	!this.listViewList.callback					=		|!this.MethodShowViewLimts('CE')|
+	!viewListTitleString						=		|No./DrawingName|
+	!viewListTitleArray							=		!viewListTitleString.split('/')
+	!this.listViewList.SetHeadings(!viewListTitleArray)
+	!this.btnRemoveViewLimt.callback			=		|!this.MethodRemoveViewLimt()|
+	!this.btnRemoveAllViewLimt.callback			=		|!this.MethodRemoveAllViewLimt()|
+	!this.btnUpdateViewSetting.callback			=		|!this.MethodUpdateViewSetting()|
+	!this.btnCopyView.callback				=		|!this.MethodCopyView()|
+
+	---------------------------------------------------------------------------
+	--第三个Frame初始化
+	!this.btnOpenDrawlistFile.callback			=		|!this.MethodOpenDrawlistFile()|
+	!this.btnExportDrawlistFile.callback		=		|!this.MethodExportDrawlistFile()|
+	!this.btnLoadDrawlistFile.callback			=		|!this.MethodLoadDrawlistFile()|
+	---------------------------------------------------------------------------
+	--第四个界面的初始化
+	--Drawing的尺寸
+	!this.buttonRegi.callback					=		|!this.MethodRegi()|
+	!drawingSizeDtextString						=		|A0/A1/A2/A3/A4|
+	!drawingSizeRtextString						=		|1189.00mm 841.00mm/841.00mm 594.00mm/594.00mm 420.00mm/420.00mm 297.00mm/297.00mm 210.00mm|
+	!drawingSizeDtextArray						=		!drawingSizeDtextString.split('/')
+	!drawingSizeRtextArray						=		!drawingSizeRtextString.split('/')
+	!this.optionDrawingSize.dtext				=		!drawingSizeDtextArray
+	!this.optionDrawingSize.rtext				=		!drawingSizeRtextArray
+	!this.optionDrawingSize.callback			=		|!this.MethodSetDrawingSize()|
+	--【本次新增·按你的要求】图纸种类选项取值（与表单定义里的 .optionLayoutKind 一一对应）：
+	--   General / PipeLayout / EquiLayout / InstLayout /
+	--   NozzleLayout(Vertical) / NozzleLayout(Horizontal)
+	--   dtext 是显示文本，rtext 是 .selection() 的返回值；两者设为同一组名字，
+	--   后续逻辑直接比较 .selection() 即可。后两项是管口方位图（立式 / 卧式）。
+	!layoutKindString								=		|General/PipeLayout/EquiLayout/InstLayout/NozzleLayout(Vertical)/NozzleLayout(Horizontal)|
+	!layoutKindArray									=		!layoutKindString.split('/')
+	!this.optionLayoutKind.dtext					=		!layoutKindArray
+	!this.optionLayoutKind.rtext					=		!layoutKindArray
+	--【本次新增·按你的要求】相对标高默认 0（单位 mm）
+	!this.textRelativeElev.val = 0
+	--图幅比例
+	!this.textScale.val							=		30
+	!this.btnNear.callback						=		|!this.MethodNearViewSize()|
+	!this.btnReSize.callback					=		|!this.MethodReSize()|
+	!this.MethodSetDrawingSize()
+	--图面样式
+	!viewTypeDtextString						=		|Universal Hidden Line/Global Hidden Line/Local Hidden Line/Modelled Wireline/Wireline Hidden Line/Wireline|
+	!viewTypeRtextString						=		|UNIVERSAL HLINE/GLOBAL HLINE/LOCAL HLINE/MWIRELINE/WIREHLINE/WIRELINE|
+	!viewTypeDtextArray							=		!viewTypeDtextString.split('/')
+	!viewTypeRtextArray							=		!viewTypeRtextString.split('/')
+	!this.optionViewType.dtext					=		!viewTypeDtextArray
+	!this.optionViewType.rtext					=		!viewTypeRtextArray
+	--图面方向
+	!directionDtextString						=		|Down/Up/East/West/North/South/ISO1/ISO2/ISO3/ISO4|
+	!directionRtextString						=		|D/U/E/W/N/S/W 45 S 35.26 D/W 45 N 35.26 D/E 45 N 35.26 D/S 45 E 35.26 D|
+	!directionDtextArray						=		!directionDtextString.split('/')
+	!directionRtextArray						=		!directionRtextString.split('/')
+	!this.optionDirection.dtext					=		!directionDtextArray
+	!this.optionDirection.rtext					=		!directionRtextArray
+
+	!this.btnGenerateView.callback				=		|!this.MethodGenerateView()|
+	
+	--【本次修改·按你的要求】原来这里给 SuppGrid/PipeGrid/InstGrid/NozzleGrid 四个按钮设回调，
+	--   按钮已随 Tables 页删除；MethodGenerateTable() 本身保留（.suppgrid() 等老入口还在用）。
+	--【本次修改】范围标记 + 北向标：按钮与 Limits 页已去掉，
+	--   改为在"生成图纸"时自动执行（见 .MethodGenerateView() 里调用的 MethodLimitsNoteFor）。
+	--   原来的 `!this.btnLimitsNote.callback = ...` 必须一并删除，否则表单初始化报 (2,759)。
+	--【本次移植新增】图纸导出（DXF/DWG 批量）
+	!this.btnAddSheet.callback		=		|!this.MethodAddSheet()|
+	!this.btnClearSheet.callback	=		|!this.MethodClearSheet()|
+	!this.btnClearAllSheet.callback	=		|!this.MethodClearAllSheet()|
+	!this.btnExportDraw.callback	=		|!this.MethodExportDraw()|
+	--导出格式下拉（老版是 drawingformat 下拉，只设 dtext）
+	!exportFormats = object array()
+	!exportFormats[1] = 'DXF'
+	!exportFormats[2] = 'DWG'
+	!this.optionExportFormat.dtext = !exportFormats
+	--【2026-10-31·按你的要求】两张表的开关与 xPos/yPos 预先填好（A0 图幅默认值，与 TableOrigin 同口径）；
+	--   你改了就按你的值定位；留空才回落到按图幅自算。
+	!this.textPipeTableX.val = 30
+	!this.textPipeTableY.val = 771
+	!this.textSuppTableX.val = 1050
+	!this.textSuppTableY.val = 771
+	--【本次修改·按你的要求】批量出图与管口注记按钮的回调设置已随 Batch / Tables 页删除
+
+	!this.textViewSizeX.Editable				=		false
+	!this.textViewSizeY.Editable				=		false
+	
+	--调用初始化函数
+	!this.initialise()
+endmethod
+---------------------------------------------------------------------------
+--【本次新增·按你的要求】管口方位图，可指定只做立式 / 只做卧式设备
+--   !orie：'VERTICAL' = 只做立式设备；'HORIZONTAL' = 只做卧式设备；'' = 不筛选（全做）。
+--   对应老版两条独立入口：mvnozzapply（立式）/ mhnozzapply（卧式），由 mnozzapply() 派发
+--   （pipelayout.pmlfrm:3574-3580，老版靠界面上的 equitype 下拉选 Vertical / Horizontal）。
+--   流程：管口名注记 -> 方位角扇形线 -> 自动出管口方位表（表与本视图同源同算法）。
+--   表格用 MethodGenerateTableFor(!view,...)：本路径下 !!ce 未必是这张视图，不能靠"当前元素"。
+define method .MethodNozzleOrieFor(!view is dbref,!orie is string)
+	if(!view.unset())then
+		!!alert.message('Please make a VIEW current, then try again.')
+		return
+	endif
+	if(!view.type ne 'VIEW')then
+		!!alert.message('Please make a VIEW current, then try again.')
+		return
+	endif
+	!nozzleNote = object NozzleOrientationGenerator()
+	!nozzleNote.view = !view
+	if(!orie ne '')then
+		!nozzleNote.orientation = !orie
+	endif
+	!status = !nozzleNote.Generate()
+	if(!status eq 'OK')then
+		--【本次修改】卧式没有角度线，改报尺寸点个数，避免出现空的 angle lines =
+		if(!orie eq 'HORIZONTAL')then
+			!msg = 'Nozzle notes drawn, dim points = ' + !nozzleNote.dimPointCount.string('D0')
+		else
+			!msg = 'Nozzle notes drawn, angle lines = ' + !nozzleNote.angleCount.string('D0')
+		endif
+		--【本次新增·按你的要求】管口标注完成后**自动生成管口方位表**
+		!this.MethodGenerateTableFor(!view,'NOZZ',!orie)
+	elseif(!status eq 'NOVIEW')then
+		!!alert.message('Please make a VIEW current, then try again.')
+	elseif(!status eq 'NOEQUI')then
+		!!alert.message('Cannot identify the equipment of this view. Check the view DrawList.')
+	elseif(!status eq 'NOMATCH')then
+		!msg = 'No equipment of this orientation in the view: ' + !orie
+		!!alert.message(!msg)
+	elseif(!status eq 'NONOZZ')then
+		!!alert.message('The equipment has no nozzles.')
+	else
+		!msg = 'Nozzle note failed: ' + !status
+		!!alert.message(!msg)
+	endif
+endmethod
+
+---------------------------------------------------------------------------
+--【本次移植新增】把当前 DRAWING 下的 SHEET 收进导出列表（老版 madddraw 5889-5897）
+define method .MethodAddSheet()
+	!exporter = object DrawingExporter()
+	!found = !exporter.CollectSheets()
+	if(!found.size() lt 1)then
+		!!alert.message('Please make a DRAWING (or one of its SHEETs) current.')
+		return
+	endif
+	-- 列表内容显式去重：老版依赖 .unique()，而该方法"是否原地生效"在部分版本上不确定
+	!sheets = !this.listSheet.dtext
+	if(!sheets.unset())then
+		!sheets = object array()
+	endif
+	do !i indices !found
+		!exists = false
+		do !k indices !sheets
+			if(!sheets[$!k] eq !found[$!i])then
+				!exists = true
+			endif
+		enddo
+		if(!exists.not())then
+			!sheets.append(!found[$!i])
+		endif
+	enddo
+	!this.listSheet.dtext = !sheets
+endmethod
+---------------------------------------------------------------------------
+--【本次移植新增】删除导出列表选中项
+-- 老版 mcleardraw 5903-5908 用的是 !draws[$!selection].delete()（对字符串元素调 delete，
+-- 被 handle any 吞掉 → 根本删不掉），这里改为 DeleteFrom + 下标校验
+define method .MethodClearSheet()
+	!sheets = !this.listSheet.dtext
+	if(!sheets.unset())then
+		return
+	endif
+	!sel = !this.listSheet.val
+	if(!sel.unset())then
+		return
+	endif
+	if(!sel lt 1 or !sel gt !sheets.size())then
+		return
+	endif
+	!sheets.DeleteFrom(!sel,1)
+	!this.listSheet.dtext = !sheets
+endmethod
+---------------------------------------------------------------------------
+--【本次移植新增】清空导出列表（老版 mclearalldraw 5899-5901）
+define method .MethodClearAllSheet()
+	!this.listSheet.clear()
+endmethod
+---------------------------------------------------------------------------
+--【本次移植新增】批量导出 DXF / DWG（老版 mexport 5910-5934）
+--   导出选项、block/LAYER 规则、LIEXEC 写法都在 DrawingExporter.SetExportOptions()
+--   与 ExportOne() 里照抄老版，可在那里按项目标准调整
+define method .MethodExportDraw()
+	!sheets = !this.listSheet.dtext
+	if(!sheets.unset())then
+		!sheets = object array()
+	endif
+	if(!sheets.size() lt 1)then
+		!!alert.message('Sheet list is empty. Click AddDraw first.')
+		return
+	endif
+	!format = !this.optionExportFormat.selection()
+	!savePath = !this.textExportPath.val
+	!exporter = object DrawingExporter()
+	!exporter.sheets = !sheets
+	!exporter.format = !format
+	!exporter.savePath = !savePath
+	!status = !exporter.Export()
+	if(!status eq 'OK')then
+		!msg = 'Export finished: ' + !exporter.okCount.string('D0') + ' sheet(s) -> ' + !savePath
+	elseif(!status eq 'PARTIAL')then
+		!msg = 'Export partial: ok=' + !exporter.okCount.string('D0') + ' failed=' + !exporter.failCount.string('D0')
+		!!alert.message(!msg)
+	elseif(!status eq 'NOSHEETS')then
+		!!alert.message('No sheet selected.')
+	elseif(!status eq 'NOFORMAT')then
+		!!alert.message('Unsupported format (DXF / DWG only).')
+	elseif(!status eq 'NOPATH')then
+		!!alert.message('Please set the save path.')
+	elseif(!status eq 'BADOPTIONS')then
+		!!alert.message('Draft export options failed (dlicon/switch). Check your Draft version.')
+	else
+		!msg = 'Export failed: ' + !status
+		!!alert.message(!msg)
+	endif
+endmethod
+---------------------------------------------------------------------------
+--【本次修改】范围标记 + 北向标（老版 limitsnote 5750-5885）
+--   在视图四角标出切图范围的 E/N 起止坐标（米），并放置北向标符号。
+--   北向标符号库由 DrawingGenerator.GenerateSylbRule 生成，本方法只查用、不新建。
+--
+-- 【拆成两个方法的原因】按你的要求，范围标记已并入"生成图纸"流程：
+--   · .MethodLimitsNoteFor(!view)  ← 实际执行体，接收 view 参数，供生成流程直接调用；
+--   · .MethodGenerateLimitsNote()  ← 保留的无界面入口（命令行/宏里仍可手调），
+--     它取当前元素当 view 再转调上面那个。
+--   （原来只有后面那个方法，且依赖 !!ce，生成流程里没法复用。）
+define method .MethodLimitsNoteFor(!view is dbref) is boolean
+	!limitsNote = object LimitsNoteGenerator()
+	!limitsNote.view = !view
+	!limitsNote.sheetSize = !this.textDrawingSize.val
+	!status = !limitsNote.Generate()
+	if(!status eq 'OK')then
+		return true
+	elseif(!status eq 'NOSYLB')then
+		-- 生成流程里不弹窗打断，只打印；符号库由 DrawingGenerator 建，正常不会缺
+		$p Limits note warning: north arrow SYTM not found.
+		return false
+	else
+		$p Limits note failed with status:
+		$p $!status
+		return false
+	endif
+endmethod
+---------------------------------------------------------------------------
+-- 无界面入口：取当前元素作为 VIEW 手工生成一次
+-- （界面上的 Limits 页已按你的要求去掉，此方法仅为命令行/宏保留）
+define method .MethodGenerateLimitsNote()
+	!view = !!ce
+	if(!view.type ne 'VIEW')then
+		!!alert.message('Please make a VIEW current, then try again.')
+		return
+	endif
+	!ok = !this.MethodLimitsNoteFor(!view)
+	if(!ok)then
+		!!alert.message('Range marks / north arrow finished with warnings. See the command line.')
+	endif
+endmethod
+---------------------------------------------------------------------------
+--【本次移植新增】生成图面表格（支架表 / 管线表 / 仪表表 / 管口方位表）
+--   !kind = 'SUPP' | 'PIPE' | 'INST' | 'NOZZ'
+--   取数：GridDataGet（按当前 VIEW 范围 + DrawList 采集，与老版字段/算法一致）
+--   绘制：GridGenerator（版式与老版表格一致，图层名各自独立）
+--   设计说明与逐条对照见 E:\DeepSeek\WorkSpace\LayoutTool\PORTING_LOG.md
+---------------------------------------------------------------------------
+--【本次移植新增】与老版同名的方法
+--   老版就是 .suppgrid() / .pipegrid() / .minstgrid() / .mnozzlegrid() 四个无参方法；
+--   这里保留同名入口，你原有的宏或命令行（!LayoutToolMain.suppgrid() 之类）可以继续用。
+--   数据来源：新版不再依赖表单 list 控件，改由 GridDataGet 按"当前视图范围 + DrawList"现取
+--   （内部用 LimitDbelementGet.GetDrawListElement('ATTA'/'PIPE'/'INST'/'EQUI')），
+--   取数口径与老版 suppnote / mpipnote / minstapply / mvnozzapply 完全一致。
+--   画面部分由 GridGenerator 完成，版式（列坐标/行高/字高/对齐）逐项照抄老版 gridsuppapply /
+--   gridpipeapply / gridinstapply / gridnozzleapply。
+define method .suppgrid()
+	!this.MethodGenerateTable('SUPP')
+endmethod
+---------------------------------------------------------------------------
+define method .pipegrid()
+	!this.MethodGenerateTable('PIPE')
+endmethod
+---------------------------------------------------------------------------
+define method .minstgrid()
+	!this.MethodGenerateTable('INST')
+endmethod
+---------------------------------------------------------------------------
+define method .mnozzlegrid()
+	!this.MethodGenerateTable('NOZZ')
+endmethod
+--【本次修改·按你的要求】表格原点：Tables 页已删 → 不再读输入框，改为**按当前图幅现算**；
+--   取值与原 MethodSetDrawingSize() 写进那些输入框的值完全一致：
+--   · 表格放图幅上方、从上往下排，所以原点是**表格上边缘**：Y = 图幅高 − 70；
+--   · 支架表 3 列合计右侧到 +115mm，故 X = 图幅宽 − 139（右边留 24mm）；其余表 X = 30。
+--   【单位坑】带单位的数值 .string() 会带出 mm（老版踩过：XYPS X 1050mm mm → SQDI），
+--   所以先剥单位再拼，与 23.10 的修法一致。图幅读不到时回落到 A0（1189×841）。
+---------------------------------------------------------------------------
+--【2026-10-31·按你的要求】表格原点：**Export 页的 xPos/yPos 优先**，两个都有值就用它们；
+--   否则回落到 TableOrigin()。自动出表与手动重出表都走这一处，所以改完值再点 Regen 就能挪位置。
+---------------------------------------------------------------------------
+--【2026-10-31·按你的要求】**第一张表该出哪种表**：由图纸种类决定。
+--   管道布置图/通用 → PIPE；设备布置图 → EQUI；仪表点位图 → INST；管口方位图 → NOZZ。
+---------------------------------------------------------------------------
+--【2026-10-31】把表格行同步到 Export 页的 list：主表（PIPE/INST/NOZZ/EQUI）进第一个，SUPP 进第二个。
+--   两条出表路径（自动 MethodAutoTables / 手动 MethodGenerateTableFor）都调它，
+--   之前只在自动路径里填，所以管口图走另一条路时 list 是空的。
+---------------------------------------------------------------------------
+--【2026-10-31】字符串右补空格（PML 没有 rjust/ljust，手写一个）
+define method .PadCell(!txt is string,!w is real) is string
+	!out = !txt
+	if(!out.unset())then
+		!out = ''
+	endif
+	!diff = !w - !out.length()
+	if(!diff gt 0)then
+		do !k from 1 to !diff
+			!out = !out & ' '
+		enddo
+	endif
+	return !out
+endmethod
+define method .FillTableList(!kind is string,!rows is array)
+	--【2026-10-31·按你的要求】list 用真正的**多列**：setRows() 给行，setHeadings() 给表头。
+	--   表头不手写：直接向 GridGenerator 要——它按表种结构化配置时会把 headers 一并建好，
+	--   这样界面上的表头和图纸上画出来的表头一字不差。
+	!gg = object GridGenerator()
+	!gg.kind = !kind
+	!cfgOk = !gg.TableConfig()
+	!hdrs = !gg.headers
+	if(!hdrs.unset())then
+		!hdrs = object array()
+	endif
+	if(!kind eq 'SUPP')then
+		!this.listSuppTable.setRows(!rows)
+		if(!hdrs.size() gt 0)then
+			!this.listSuppTable.setHeadings(!hdrs)
+		endif
+	else
+		!this.listPipeTable.setRows(!rows)
+		if(!hdrs.size() gt 0)then
+			!this.listPipeTable.setHeadings(!hdrs)
+		endif
+	endif
+endmethod
+define method .PrimaryTableKind() is string
+	!lk = !this.optionLayoutKind.selection()
+	if(!lk eq 'EquiLayout')then
+		return 'EQUI'
+	elseif(!lk eq 'InstLayout')then
+		return 'INST'
+	elseif(!lk.matchwild('*NozzleLayout*'))then
+		return 'NOZZ'
+	endif
+	return 'PIPE'
+endmethod
+---------------------------------------------------------------------------
+--【2026-10-31】第一张表的 Regen：按当前图纸种类自动选表种
+define method .RegenPrimaryTable()
+	!kind = !this.PrimaryTableKind()
+	!this.MethodGenerateTable(!kind)
+endmethod
+define method .TableOriginFor(!kind is string) is string
+	!tabX = 0
+	!tabY = 0
+	--【2026-10-31】SUPP 用第二张表的坐标，其它（PIPE/INST/NOZZ/EQUI）都用第一张表的
+	if(!kind eq 'SUPP')then
+		!tabX = !this.textSuppTableX.val
+		!tabY = !this.textSuppTableY.val
+	else
+		!tabX = !this.textPipeTableX.val
+		!tabY = !this.textPipeTableY.val
+	endif
+	!hasXY = false
+	if(!tabX gt 0.1)then
+		if(!tabY gt 0.1)then
+			!hasXY = true
+		endif
+	endif
+	if(!hasXY.not())then
+		return !this.TableOrigin(!kind)
+	endif
+	!xs = !tabX.string()
+	!ys = !tabY.string()
+	if(!xs.match(|mm|) gt 0)then
+		!xs = !xs.before('mm')
+	endif
+	if(!ys.match(|mm|) gt 0)then
+		!ys = !ys.before('mm')
+	endif
+	return 'X ' & !xs & ' mm Y ' & !ys & ' mm'
+endmethod
+define method .TableOrigin(!kind is string) is string
+	!positionX = 1189
+	!positionY = 841
+	!positionX = !this.textDrawingSize.val.before(' ').real()
+	!positionY = !this.textDrawingSize.val.after(' ').real()
+	handle any
+		!positionX = 1189
+		!positionY = 841
+	endhandle
+	!tableTopY = !positionY - 70
+	!suppOriginX = !positionX - 139
+	!topYText = !tableTopY.string()
+	!suppXText = !suppOriginX.string()
+	if(!topYText.match(|mm|) gt 0)then
+		!topYText = !topYText.before('mm')
+	endif
+	if(!suppXText.match(|mm|) gt 0)then
+		!suppXText = !suppXText.before('mm')
+	endif
+	if(!kind eq 'SUPP')then
+		return 'X ' + !suppXText + ' mm Y ' + !topYText + ' mm'
+	endif
+	return 'X 30 mm Y ' + !topYText + ' mm'
+endmethod
+---------------------------------------------------------------------------
+--【本次新增】图纸生成后自动出表：支架表(SUPP) + 管线表(PIPE)
+--   这就是"在图纸生成过程中直接统计参数、生成后立即出表"的做法：
+--   数据由 GridDataGet 从**刚建好的这张视图**的 DrawList + 视图范围现取
+--   （内部走 LimitDbelementGet.GetDrawListElement('ATTA'/'PIPE')），与标注用的是同一套取数口径，
+--   因此不需要任何中间 List 控件，也不存在"图纸生成完之后取不到参数"的问题。
+--   与点按钮的区别：这里不弹任何对话框（空表静默跳过，23.159 起不再打印说明），避免打断出图流程。
+define method .MethodAutoTables(!view is dbref)
+	--【本次修改·按你的要求】改走统一方法：Drawing Setting 的新框优先，老框兜底
+	!relative = !this.RelativeElevation()
+	if(!relative.unset())then
+		!relative = 0
+	endif
+	!kinds = object array()
+	--【本次新增·按你的要求】EquiLayout（设备布置图）出**设备表**；其它图种仍是支架表 + 管线表
+	--【本次修改·按你的要求】表格种类按图纸种类分派：
+	--   EquiLayout（设备布置图）→ 设备表；InstLayout（仪表点位图）→ 仪表表；
+	--   其它图种 → 支架表 + 管线表（与老版一致）。
+	!kindSel = !this.optionLayoutKind.selection()
+	if(!kindSel eq 'EquiLayout')then
+		!kinds[1] = 'EQUI'
+	elseif(!kindSel eq 'InstLayout')then
+		!kinds[1] = 'INST'
+	elseif(!kindSel.matchwild('*NozzleLayout*'))then
+		--【2026-10-31·按你的要求】管口方位图（立式/卧式）出管口表（NOZZ），进第一个 list
+		!kinds[1] = 'NOZZ'
+	else
+		!kinds[1] = 'SUPP'
+		!kinds[2] = 'PIPE'
+	endif
+	do !i indices !kinds
+		!kind = !kinds[$!i]
+		--【2026-10-31·按你的要求】去掉了两个勾选框：出图时该出的表自动出，不再由用户选
+		!gridData = object GridDataGet()
+		!gridData.view = !view
+		!gridData.relative = !relative
+		!rows = !gridData.GetRows(!kind)
+		!nRows = !rows.size()
+		--【2026-10-31】表格内容同步到 Export 页对应的 list（序号 + 名称）
+		!this.FillTableList(!kind,!rows)
+		if(!rows.size() lt 1)then
+			skip
+		endif
+		!gridGenerator = object GridGenerator()
+		!gridGenerator.view = !view
+		--【2026-10-31·按你的要求】表格建在 **SHEE 层级**（视图的 owner），而不是挂在视图下
+		!gridGenerator.parentSlab = !view.owner
+		!gridGenerator.rows = !rows
+		--【2026-10-31·按你的要求】用你在 Export 页填的 xPos/yPos；两个都有值就用，
+		--   否则回落到按图幅自算（TableOrigin）。所以改完值再重新出表，表位置就跟着变。
+		!tabX = 0
+		!tabY = 0
+		if(!kind eq 'PIPE')then
+			!tabX = !this.textPipeTableX.val
+			!tabY = !this.textPipeTableY.val
+		elseif(!kind eq 'SUPP')then
+			!tabX = !this.textSuppTableX.val
+			!tabY = !this.textSuppTableY.val
+		endif
+		!hasXY = false
+		if(!tabX gt 0.1)then
+			if(!tabY gt 0.1)then
+				!hasXY = true
+			endif
+		endif
+		!originXY = ''
+		if(!hasXY)then
+			!xs = !tabX.string()
+			!ys = !tabY.string()
+			if(!xs.match(|mm|) gt 0)then
+				!xs = !xs.before('mm')
+			endif
+			if(!ys.match(|mm|) gt 0)then
+				!ys = !ys.before('mm')
+			endif
+			!originXY = 'X ' & !xs & ' mm Y ' & !ys & ' mm'
+		else
+			!originXY = !this.TableOriginFor(!kind)
+		endif
+		!gridGenerator.originXYPS = !originXY
+		!status = !gridGenerator.Generate(!kind)
+	--【本次修改】只在失败时打状态码（成功不再逐表刷屏）：'BADMODULE' 表示内存里的
+	-- gridgenerator 模块是旧的/只编译了一半（没重载 object），命令行里已经打印了该怎么办。
+		if(!status ne 'OK')then
+			$p Auto table failed for kind:
+			$p $!kind
+			$p $!status
+		endif
+	enddo
+endmethod
+---------------------------------------------------------------------------
+define method .MethodGenerateTable(!kind is string)
+	-- 目标视图：优先取当前元素；若当前元素不是 VIEW，则按老版做法先 `view` 再取
+	--（老版 suppgrid/pipegrid 就是 `view` + `!view = !!ce`，所以"当前不在视图上"也照样能用）
+	!view = !!ce
+	--【2026-10-31·按你的要求】CE 是图纸（SHEE）时，取它下面的第一张视图当数据源，
+	--   表格仍然建在 SHEE 下；读不到视图才回退到老做法（试 `view` 命令）。
+	if(!view.type eq 'SHEE')then
+		var !vws coll all view for $!view
+		if(!vws.size() gt 0)then
+			!view = !vws[1].dbref()
+		endif
+	endif
+	if(!view.type ne 'VIEW')then
+		!viewOk2 = true
+		view
+		-- 【PML 语义提醒】handle 覆盖它前面的语句
+		handle any
+			!viewOk2 = false
+		endhandle
+		if(!viewOk2.not())then
+			!!alert.message('Please make a VIEW current, then try again.')
+			return
+		endif
+		!view = !!ce
+		if(!view.type ne 'VIEW')then
+			!!alert.message('Please make a VIEW current, then try again.')
+			return
+		endif
+	endif
+	!this.MethodGenerateTableFor(!view,!kind,'')
+endmethod
+---------------------------------------------------------------------------
+--【本次新增·按你的要求】带**显式视图**的表格生成：
+--   Drawing Setting 的 Layout 流程里 !!ce 未必是刚建好的那张视图（见 MethodGenerateView：
+--   视图是按 /<图名>/S/V 显式定位的），所以表格不能再用"当前元素"取视图。
+--   原 MethodGenerateTable() 主体一行未改，只是把视图来源从 !!ce 换成参数 !view。
+---------------------------------------------------------------------------
+--【本次新增·按你的要求】全插件统一的"相对标高"(mm)
+--   优先读 Drawing Setting 里的 .textRelativeElev（新加的那个框）；
+--   没填就退回 Tables 页老框 .textTableRelative（兼容旧用法）；都没有当 0。
+--   所有算标高的地方都减掉它：GridDataGet 的支架/管线/仪表表、DimensionGenerator 的 EL 标注。
+define method .RelativeElevation() is real
+	!rel = !this.textRelativeElev.val
+	if(!rel.unset())then
+	endif
+	return !rel
+endmethod
+---------------------------------------------------------------------------
+define method .MethodGenerateTableFor(!view is dbref,!kind is string,!nozzOrie is string)
+	-- 表格原点：按类型各取各的（见 TableOrigin()：控件缺失或为空时回落到上方定位的默认值，
+	-- 正常由 .MethodSetDrawingSize() 按图幅给出：Y = 图幅高 − 70，支架表 X = 图幅宽 − 139、其余 X 30；
+	-- 原点是**表格上边缘**，行从上往下排）
+	!origin = !this.TableOriginFor(!kind)
+	-- 相对标高(mm)：老版管线页 relative 与仪表页 instrelative 合并为一个输入框
+	--【本次修改·按你的要求】改走统一方法：Drawing Setting 的新框优先，老框兜底
+	!relative = !this.RelativeElevation()
+	if(!relative.unset())then
+		!relative = 0
+	endif
+	-- 取数
+	!gridData = object GridDataGet()
+	!gridData.view = !view
+	!gridData.relative = !relative
+	--【本次新增·按你的要求】管口表第 4 列按模式给：
+	--   立式（'' 或 'VERTICAL'）= 方位角；卧式（'HORIZONTAL'）= 管口标高（老版 mhnozzapply 3620）。
+	!gridData.nozzOrie = !nozzOrie
+	!rows = !gridData.GetRows(!kind)
+	--【2026-10-31】手动出表也同步 list（之前只有自动路径填）
+	!this.FillTableList(!kind,!rows)
+	if(!rows.size() lt 1)then
+		!msg = 'No ' + !kind + ' data found in this view.'
+		!!alert.message(!msg)
+		return
+	endif
+	-- 画表
+	!gridGenerator = object GridGenerator()
+	!gridGenerator.view = !view
+	--【2026-10-31·按你的要求】表格建在 **SHEE 层级**（视图的 owner），而不是挂在视图下
+	!gridGenerator.parentSlab = !view.owner
+	!gridGenerator.rows = !rows
+	!gridGenerator.originXYPS = !origin
+	-- 表头第 4 列也跟着变（Angle / Elevation）
+	!gridGenerator.nozzOrie = !nozzOrie
+	!status = !gridGenerator.Generate(!kind)
+	if(!status ne 'OK')then
+		!msg = 'Generate table failed: ' + !status
+		!!alert.message(!msg)
+		return
+	endif
+	!msg = !kind + ' table generated, rows = ' + !rows.size().string('D0')
+endmethod
+
+---------------------------------------------------------------------------
+--初始化的一些参数，项目号、日期
+define method .initialise()
+	!currentProject					=			current project
+	!projectCode					=			!currentProject.code()
+	var !date clock date
+	!datearray						=			split(!date,'  ')
+	if(!datearray[1].length() eq 1)then
+		!today						=			'0$!datearray[1]'
+	else
+		!today						=			!datearray[1]
+	endif
+	if(!datearray[2].length() EQ 0 )then
+		!month						=			!datearray[3]
+		!year						=			!datearray[4]
+	else
+		!month						=			!datearray[2]
+		!year						=			!datearray[3]
+	endif
+	!timetable						=			object array()
+	!timetable[1]					=			'January'
+	!timetable[2]					=			'February'
+	!timetable[3]					=			'March'
+	!timetable[4]					=			'April'
+	!timetable[5]					=			'May'
+	!timetable[6]					=			'June'
+	!timetable[7]					=			'July'
+	!timetable[8]					=			'August'
+	!timetable[9]					=			'September'
+	!timetable[10]					=			'October'
+	!timetable[11]					=			'November'
+	!timetable[12]					=			'December'
+	do !i indices !timetable
+		if(!timetable[$!i].match(!month) ne 0)then
+			if(!i lt 10)then
+				!month = '0' + !i.string()
+			else
+				!month = !i.string()
+			endif
+		endif
+	enddo
+	!this.textDrawingName.val			=			!projectCode + '_' + !year + !month + !today
+	
+	!drawlistSavePath				=			'%pdmsuser%\$!projectCode'
+	!filePath						=			object file('$!drawlistSavePath')
+	!drawlistFile					=			!projectCode + '_' + !year + !month + !today + '.xml'
+	
+	if(!filePath.EXISTS())then
+		!this.textDrawlistConfig.val		=			!drawlistSavePath + '\' + !drawlistFile
+	endif
+endmethod
+---------------------------------------------------------------------------
+define method .MethodCurrentDrawlist()
+	!fmsystem = object FMSYS()
+	!models = !this.listDrawList.dtext
+	!form = !fmSystem.currentDocument()
+	!drawlist = !!gphDrawlists.drawlist(!form.view)
+	!list = !drawlist.members()
+	if (!list.empty()) then
+		return
+	else
+		do !ptrlist indices !list
+			!name = !list[$!ptrlist].name
+			!models.Append(!name)
+		enddo
+		!models.sortunique()
+		!this.listDrawList.dtext = !models
+	endif
+endmethod
+---------------------------------------------------------------------------
+define method .MethodLimitValue()
+	if(!this.btnLimitValue.tag eq '+')then
+		!this.btnLimitValue.tag			=	'-'		
+		!this.btnFromEastAddSub.tag		=	'-'
+		!this.btnFromNorthAddSub.tag	=	'-'
+		!this.btnFromUpAddSub.tag		=	'-'
+		!this.btnToEastAddSub.tag		=	'-'
+		!this.btnToNorthAddSub.tag		=	'-'
+		!this.btnToUpAddSub.tag			=	'-'
+	elseif(!this.btnLimitValue.tag eq '-')then
+		!this.btnLimitValue.tag			=	'+'
+		!this.btnFromEastAddSub.tag		=	'+'
+		!this.btnFromNorthAddSub.tag	=	'+'
+		!this.btnFromUpAddSub.tag		=	'+'
+		!this.btnToEastAddSub.tag		=	'+'
+		!this.btnToNorthAddSub.tag		=	'+'
+		!this.btnToUpAddSub.tag			=	'+'
+	endif
+endmethod
+---------------------------------------------------------------------------
+define method .MethodAddSubValue(!direction is string)
+	!value = !this.textLimitValue.val
+	if(!value.unset())then
+		return
+	endif
+	if(!this.btnLimitValue.tag eq '+')then
+		if(!direction eq 'FromEast')then
+			!this.textFromEast.val = !this.textFromEast.val + !value
+			handle any
+				return
+			endhandle
+		elseif(!direction eq 'FromNorth')then
+			!this.textFromNorth.val = !this.textFromNorth.val + !value
+			handle any
+				return
+			endhandle
+		elseif(!direction eq 'FromUp')then
+			!this.textFromUp.val = !this.textFromUp.val + !value
+			handle any
+				return
+			endhandle
+		elseif(!direction eq 'ToEast')then
+			!this.textToEast.val = !this.textToEast.val + !value
+			handle any
+				return
+			endhandle
+		elseif(!direction eq 'ToNorth')then
+			!this.textToNorth.val = !this.textToNorth.val + !value
+			handle any
+				return
+			endhandle
+		elseif(!direction eq 'ToUp')then
+			!this.textToUp.val = !this.textToUp.val + !value
+			handle any
+				return
+			endhandle
+		endif
+	elseif(!this.btnLimitValue.tag eq '-')then
+		if(!direction eq 'FromEast')then
+			!this.textFromEast.val = !this.textFromEast.val - !value
+			handle any
+				return
+			endhandle
+		elseif(!direction eq 'FromNorth')then
+			!this.textFromNorth.val = !this.textFromNorth.val - !value
+			handle any
+				return
+			endhandle
+		elseif(!direction eq 'FromUp')then
+			!this.textFromUp.val = !this.textFromUp.val - !value
+			handle any
+				return
+			endhandle
+		elseif(!direction eq 'ToEast')then
+			!this.textToEast.val = !this.textToEast.val - !value
+			handle any
+				return
+			endhandle
+		elseif(!direction eq 'ToNorth')then
+			!this.textToNorth.val = !this.textToNorth.val - !value
+			handle any
+				return
+			endhandle
+		elseif(!direction eq 'ToUp')then
+			!this.textToUp.val = !this.textToUp.val - !value
+			handle any
+				return
+			endhandle
+		endif
+	endif
+	!this.MethodShowAidBox()
+	
+endmethod
+---------------------------------------------------------------------------
+define method .MethodPickLimit()
+  
+  !number = 2
+  !packet                =		Object EDGPACKET()
+  !packet.key            =		''
+  !packet.description    =		'' 
+  !packet.action         =		'!!LayoutToolMain.PickPoint(!this.return)'
+  !packet.priority       =		3
+  !packet.remove         =		true
+  --!packet.type          =		'dbModify'
+  do !i from 1 to !number
+    !packet.pickPacket.picks[!i]        =		object EDGPICKTYPE()
+    !packet.pickPacket.picks[!i].positioning = true
+    !packet.pickPacket.picks[!i].stdPosition('P' & !i)
+  enddo
+  
+  !!edgPosCntrl.setPick(7)
+  !!edgPosCntrl.setPickType(1)
+  !!edgCntrl.add(!packet)
+endmethod
+---------------------------------------------------------------------------
+define method .MethodClipView()
+	if(!this.btnClipView.background eq 4)then
+		!this.btnClipView.background = 0
+
+		!numView = !!gphViews.views
+		if (!numView.size() gt 0) then
+			do !a from 1 to !numView.size()
+				!NAMEV = '!!'+'GPH3DDESIGN'+'$!A'+'.clipBox.disable()'
+				$!NAMEV
+				handle any
+				endhandle
+			enddo
+		endif
+	else
+		!this.btnClipView.background = 4
+		!xlen = abs(!this.textToEast.val - !this.textFromEast.val)
+		handle any
+			return
+		endhandle
+		!ylen = abs(!this.textToNorth.val - !this.textFromNorth.val)
+		!zlen = abs(!this.textToUp.val - !this.textFromUp.val)
+		!xcenter = (!this.textToEast.val + !this.textFromEast.val) / 2
+		!ycenter = (!this.textToNorth.val + !this.textFromNorth.val) / 2
+		!zcenter = (!this.textToUp.val + !this.textFromUp.val) / 2
+		
+		!numView = !!gphViews.views
+		if (!numView.size() gt 0) then
+			Clip Xlen $!xlen Ylen $!ylen Zlen $!zlen Pos  e $!xcenter n $!ycenter u $!zcenter
+			do !a from 1 to !numView.size()
+				!NAMEV = '!!'+'GPH3DDESIGN'+'$!A'+'.clipBox.enable()'
+				$!NAMEV
+				handle any
+				endhandle
+			enddo
+		endif
+	endif
+endmethod
+---------------------------------------------------------------------------
+define method .MethodSaveView()
+	--保存当前的View设置
+	!currentDrawingName		=	!this.textDrawingName.val
+	--如果没命名需要提示
+	if(!currentDrawingName.Empty())then
+		!!alert.Message('Please set View name')
+		return
+	endif
+	--如果没设置位置信息需要提示
+	!viewPositionFromEast	=	!this.textFromEast.val
+	!viewPositionFromNorth	=	!this.textFromNorth.val
+	!viewPositionFromUp		=	!this.textFromUp.val
+	!viewPositionToEast		=	!this.textToEast.val
+	!viewPositionToNorth	=	!this.textToNorth.val
+	!viewPositionToUp		=	!this.textToUp.val
+	!viewPositonFlag		=	!viewPositionFromEast.Set() and !viewPositionFromNorth.Set() and !viewPositionFromUp.Set() and !viewPositionToEast.Set() and !viewPositionToNorth.Set() and !viewPositionToUp.Set()
+	if(!viewPositonFlag.NOT())then	
+		!!alert.Message('Please set View position')
+		return
+	endif
+
+	!positionFrom			=		object position()
+	!positionFrom.east		=		!viewPositionFromEast
+	!positionFrom.north		=		!viewPositionFromNorth
+	!positionFrom.up		=		!viewPositionFromUp
+	!positionFrom.ORIGIN	=		world
+	
+	!positionTo				=		object position()
+	!positionTo.east		=		!viewPositionToEast
+	!positionTo.north		=		!viewPositionToNorth
+	!positionTo.up			=		!viewPositionToUp
+	!positionTo.ORIGIN		=		world
+	
+	!this.memberViewConfig.viewName				=		!currentDrawingName
+	!this.memberViewConfig.viewLimitFrom		=		!positionFrom
+	!this.memberViewConfig.viewLimitTo			=		!positionTo
+	!viewPosition								=		object array()
+	!viewPosition[1]							=		!this.textViewPositionX.val.STRING()
+	!viewPosition[2]							=		!this.textViewPositionY.val.STRING()
+	!this.memberViewConfig.viewPosition			=		!viewPosition
+	!this.memberViewConfig.viewDirection		=		!this.optionDirection.selection()
+	!this.memberViewConfig.viewType				=		!this.optionViewType.selection()
+	!this.memberViewConfig.viewScale			=		!this.textScale.val
+	!this.memberViewConfig.viewGrid				=		!this.textGrid.val
+	
+	--【本次新增·按你的要求】保存这个视图时，把它自己的 DrawList / RemoveList 一并存进 ViewConfig
+	--   （与范围/比例一样属于"该视图的独立设置"，随 XML 导出/载入）
+	!this.memberViewConfig.drawlist = !this.listDrawList.dtext
+	!this.memberViewConfig.removelist = !this.listRemoveList.dtext
+	--【本次新增·按你的要求】Drawing Setting 里的 Layout 选项（生成类型）也存进该视图配置 ——
+	--   与 DrawList/RemoveList 同级，随 XML 导出/载入，点选 viewlist 时自动切回。
+	!this.memberViewConfig.layoutKind = !this.optionLayoutKind.selection()
+	--【本次新增·按你的要求】相对标高(mm) 也存进该视图配置（随 XML 导出/载入、点选 viewlist 时载回）
+	!this.memberViewConfig.relativeElev = !this.textRelativeElev.val
+	!this.SaveViewConfig()
+endmethod
+---------------------------------------------------------------------------
+--把View范围存起来，如果设置相同就清除
+define method .SaveViewConfig()
+	!viewNotExist			=	true
+	!viewList				=	object array()
+	!viewListTemp			=	object array()
+	if(!this.memberViewList.Empty())then
+		!this.memberViewList.append(!this.memberViewConfig)
+	else
+		do !i indices !this.memberViewList
+			if(!this.memberViewList[$!i].eq(!this.memberViewConfig))then
+				!viewNotExist	=	false
+			endif
+		enddo
+		if(!viewNotExist)then
+			!this.memberViewList.append(!this.memberViewConfig)
+		endif
+	endif
+
+	!this.listViewList.clear()
+	
+	do !i indices !this.memberViewList
+		!viewListTemp[1]	=	!i.string()
+		!viewListTemp[2]	=	!this.memberViewList[$!i].viewName
+		!viewList.append(!viewListTemp)
+	enddo
+	!this.listViewList.setRows(!viewList)
+	
+endmethod
+---------------------------------------------------------------------------
+define method .MethodCopyView()
+	--【本次新增·按你的要求】复制当前选中的 View 设置：
+	--   新名字 = 原名字 + 'Copy'；若已存在则 Copy-1、Copy-2 ……（最多试到 Copy-500）
+	--   【为什么逐个成员搬】PML 里数组是**引用语义**（!a = !b 只是起别名），
+	--   所以 viewPosition / drawlist / removelist 必须逐个 append 到新数组，
+	--   否则改副本会连带改到原视图。position 是值语义，直接赋值即可。
+	!select = !this.listViewList.val
+	!src = !this.memberViewList[$!select]
+	handle(2,752)
+		!!alert.Message('Please select a view in the list first')
+		return
+	endhandle
+	!baseName = !src.viewName
+	--找一个没被占用的名字
+	!newName = ''
+	do !try from 0 to 500
+		if(!try eq 0)then
+			!cand = !baseName + 'Copy'
+		else
+			!cand = !baseName + 'Copy-' + !try.string('D0')
+		endif
+		!used = false
+		do !i indices !this.memberViewList
+			if(!this.memberViewList[$!i].viewName eq !cand)then
+				!used = true
+			endif
+		enddo
+		if(!used.not())then
+			!newName = !cand
+			break
+		endif
+	enddo
+	if(!newName eq '')then
+		!!alert.Message('Cannot find a free name for the copy')
+		return
+	endif
+	!copy = object ViewConfig()
+	!copy.viewName = !newName
+	!copy.viewLimitFrom = !src.viewLimitFrom
+	!copy.viewLimitTo = !src.viewLimitTo
+	!copy.viewDirection = !src.viewDirection
+	!copy.viewType = !src.viewType
+	!copy.viewScale = !src.viewScale
+	!copy.viewGrid = !src.viewGrid
+	!copy.layoutKind = !src.layoutKind
+	!copy.relativeElev = !src.relativeElev
+	!copy.viewPosition = object array()
+	do !k indices !src.viewPosition
+		!copy.viewPosition.append(!src.viewPosition[$!k])
+	enddo
+	!copy.drawlist = object array()
+	do !k indices !src.drawlist
+		!copy.drawlist.append(!src.drawlist[$!k])
+	enddo
+	!copy.removelist = object array()
+	do !k indices !src.removelist
+		!copy.removelist.append(!src.removelist[$!k])
+	enddo
+	--【稳健】老 XML 载入的行里可能有空值成员（unset）；出错只提示、不生成半成品副本。
+	--   （PML 里 handle 保护的是它**前面**的语句，处理体在 handle 与 endhandle 之间。）
+	!copyBad = false
+	handle any
+		!copyBad = true
+	endhandle
+	if(!copyBad)then
+		!!alert.Message('Copy failed - some settings of the selected view are empty. Save it again, then copy.')
+		return
+	endif
+	!this.memberViewList.append(!copy)
+	--刷新列表（与 SaveViewConfig / MethodUpdateViewSetting 同一套写法）
+	!viewList = object array()
+	!viewListTemp = object array()
+	do !i indices !this.memberViewList
+		!viewListTemp[1] = !i.string()
+		!viewListTemp[2] = !this.memberViewList[$!i].viewName
+		!viewList.append(!viewListTemp)
+	enddo
+	!this.listViewList.clear()
+	!this.listViewList.setRows(!viewList)
+	--把选中行落在新副本上（副本内容与原视图一致，表单里的值仍然对得上）
+	!this.listViewList.val = !this.memberViewList.size()
+endmethod
+---------------------------------------------------------------------------
+define method .MethodShowViewLimts(!message is string)
+	aid clear all
+	!viewList = !this.memberViewList
+	do !ptrViewList indices !viewList 
+		if(!this.listViewList.val eq !ptrViewList and !message eq 'CE')then
+			!fill = 'on'
+			!this.textFromEast.val		= !viewList[$!ptrViewList].VIEWLIMITFROM.east
+			!this.textFromNorth.val		= !viewList[$!ptrViewList].VIEWLIMITFROM.north
+			!this.textFromUp.val		= !viewList[$!ptrViewList].VIEWLIMITFROM.up
+			!this.textToEast.val		= !viewList[$!ptrViewList].VIEWLIMITTO.east
+			!this.textToNorth.val		= !viewList[$!ptrViewList].VIEWLIMITTO.north
+			!this.textToUp.val			= !viewList[$!ptrViewList].VIEWLIMITTO.up
+			!this.textDrawingName.val		= !viewList[$!ptrViewList].viewName
+			
+			!this.textViewPositionX.val	= !viewList[$!ptrViewList].viewPosition[1].real()
+			!this.textViewPositionY.val	= !viewList[$!ptrViewList].viewPosition[2].real()
+			!this.textScale.val			= !viewList[$!ptrViewList].viewScale
+			!this.textGrid.val			= !viewList[$!ptrViewList].viewGrid
+			
+			!this.optionViewType.Select('Rtext',!viewList[$!ptrViewList].viewType)
+			!this.optionDirection.Select('Rtext',!viewList[$!ptrViewList].viewDirection)
+			--【本次新增·按你的要求】点选 viewlist 时，连这个视图**自己的** DrawList / RemoveList 一起载入
+			--   （没存过的配置是空数组 → 列表清空，不会残留上一个视图的清单）
+			!this.listDrawList.clear()
+			if(!viewList[$!ptrViewList].drawlist.unset().not())then
+				!this.listDrawList.dtext = !viewList[$!ptrViewList].drawlist
+			endif
+			!this.listRemoveList.clear()
+			if(!viewList[$!ptrViewList].removelist.unset().not())then
+				!this.listRemoveList.dtext = !viewList[$!ptrViewList].removelist
+			endif
+			--【本次新增·按你的要求】点选 viewlist 时，Drawing Setting 里的 Layout 下拉
+			--   **自动切回**这个视图存过的生成类型；
+			--   没存过（老 XML 文件）就不动，保持当前选择。
+			if(!viewList[$!ptrViewList].layoutKind.unset().not())then
+				!lkValue = !viewList[$!ptrViewList].layoutKind
+				!this.optionLayoutKind.Select('Rtext',!lkValue)
+				handle any
+					!lkMsg = 'Stored layout kind not in the option list, dropdown left unchanged: ' + !lkValue
+					$p $!lkMsg
+				endhandle
+			endif
+			--【本次修改·按你的反馈】点选视图时**总是**把相对标高切到该视图的值：
+			--   · 该视图存过 → 用它；
+			--   · 没存过（从老 XML 载入的、或在这个字段存在之前保存过的视图）→ 归 0。
+			--   原来写的是：没存过就不动这个框 —— 结果你点了视图，框里的值一直不变，看着像没生效。
+			--   设好值后点 SaveView / UpdateView，就会存进该视图。
+			--【报错防护】(2,759)：万一 ViewConfig 对象没重新编译（没有这个成员），
+			--   读它会抛错并把整个点选流程带断，所以这里用 handle 接住：读不到就只提示、不动框。
+			!relStore = 0
+			!relOk = true
+			!relStore = !viewList[$!ptrViewList].relativeElev
+			handle any
+				!relOk = false
+			endhandle
+			if(!relOk.not())then
+				$p Relative elevation: member not readable (reload the ViewConfig object) - box left unchanged.
+			elseif(!relStore.unset())then
+				!this.textRelativeElev.val = 0
+			else
+				!this.textRelativeElev.val = !relStore
+			endif
+			
+		else
+			!fill = 'off'
+		endif
+		!center = !viewList[$!ptrViewList].VIEWLIMITFROM.midpoint(!viewList[$!ptrViewList].VIEWLIMITTO)
+		!xlen = abs(!viewList[$!ptrViewList].VIEWLIMITFROM.east - !viewList[$!ptrViewList].VIEWLIMITTO.east)
+		!ylen = abs(!viewList[$!ptrViewList].VIEWLIMITFROM.north - !viewList[$!ptrViewList].VIEWLIMITTO.north)
+		!zlen = abs(!viewList[$!ptrViewList].VIEWLIMITFROM.up - !viewList[$!ptrViewList].VIEWLIMITTO.up)
+		aid box number $!ptrViewList pos $!center xlen $!xlen ylen $!ylen zlen $!zlen fill $!fill
+		
+	enddo
+	!this.MethodReSize()
+endmethod
+---------------------------------------------------------------------------
+define method .MethodRemoveViewLimt()
+	!viewListTemp			=	object array()
+	!viewList				=	object array()
+	!viewConfigList = !this.memberViewList
+	!select = !this.listViewList.val
+	!viewConfigList.DeleteFrom(!select,1)
+	!viewConfigList.Compress()
+	!this.memberViewList.clear()
+	!this.listViewList.clear()
+	!this.memberViewList = !viewConfigList
+	do !i indices !this.memberViewList
+		!viewListTemp[1]	=	!i.string()
+		!viewListTemp[2]	=	!this.memberViewList[$!i].viewName
+		!viewList.append(!viewListTemp)
+	enddo
+	!this.listViewList.setRows(!viewList)
+	!this.MethodShowViewLimts('ALL')
+endmethod
+---------------------------------------------------------------------------
+define method .MethodRemoveAllViewLimt()
+	!this.memberViewList.clear()
+	!this.listViewList.clear()
+	aid clear all
+endmethod
+---------------------------------------------------------------------------
+define method .MethodUpdateViewSetting()
+	!select = !this.listViewList.val
+	!currnetViewConfig = !this.memberViewList[$!select]
+	handle(2,752)
+		return
+	endhandle
+	
+	!viewPositionFromEast	=	!this.textFromEast.val
+	!viewPositionFromNorth	=	!this.textFromNorth.val
+	!viewPositionFromUp		=	!this.textFromUp.val
+	!viewPositionToEast		=	!this.textToEast.val
+	!viewPositionToNorth	=	!this.textToNorth.val
+	!viewPositionToUp		=	!this.textToUp.val
+	!currentDrawingName		=	!this.textDrawingName.val
+	
+	!currnetViewConfig.viewName				= !currentDrawingName
+	!currnetViewConfig.viewLimitFrom.east	= !viewPositionFromEast
+	!currnetViewConfig.viewLimitFrom.north	= !viewPositionFromNorth
+	!currnetViewConfig.viewLimitFrom.Up		= !viewPositionFromUp
+	!currnetViewConfig.viewLimitTo.east		= !viewPositionToEast
+	!currnetViewConfig.viewLimitTo.north	= !viewPositionToNorth
+	!currnetViewConfig.viewLimitTo.Up		= !viewPositionToUp
+	
+	!viewPosition							=		object array()
+	!viewPosition[1]						=		!this.textViewPositionX.val.STRING()
+	!viewPosition[2]						=		!this.textViewPositionY.val.STRING()
+	!currnetViewConfig.viewPosition			=		!viewPosition
+	!currnetViewConfig.viewDirection		=		!this.optionDirection.selection()
+	!currnetViewConfig.viewType				=		!this.optionViewType.selection()
+	!currnetViewConfig.viewScale			=		!this.textScale.val
+	!currnetViewConfig.viewGrid				=		!this.textGrid.val
+	
+	--【本次新增·按你的要求】"更新选中视图设置"时，把当前 DrawList / RemoveList 一并存回该配置
+	!currnetViewConfig.drawlist = !this.listDrawList.dtext
+	!currnetViewConfig.removelist = !this.listRemoveList.dtext
+	--【本次新增·按你的要求】"更新选中视图设置"时，把当前 Layout 选项一并存回该配置
+	!currnetViewConfig.layoutKind = !this.optionLayoutKind.selection()
+	--【本次新增·按你的要求】更新选中视图设置时，把当前相对标高(mm)一并存回
+	!currnetViewConfig.relativeElev = !this.textRelativeElev.val
+	!this.memberViewList[$!select] = !currnetViewConfig
+	!this.listViewList.clear()
+	
+	!viewList				=	object array()
+	!viewListTemp			=	object array()
+	do !i indices !this.memberViewList
+		!viewListTemp[1]	=	!i.string()
+		!viewListTemp[2]	=	!this.memberViewList[$!i].viewName
+		!viewList.append(!viewListTemp)
+	enddo
+	!this.listViewList.setRows(!viewList)
+	
+	!this.MethodShowViewLimts('CE')
+endmethod
+---------------------------------------------------------------------------
+define method .PickPoint(!data is array)
+	!roots = object array()
+	if(!data[1].objecttype() eq 'ARRAY')then
+		do !dt values !data[1]
+		!temp[1] = !dt.item
+			if(!dt.item.owner.type eq 'SCTN')then
+				!temp[1] = !dt.item.owner
+			endif
+			!temp[2] = !dt.position.wrt( /* )
+			!roots.appendArray(!temp)
+		enddo
+	else
+		!roots[1] = !data[1].item
+		!roots[2] = !data[1].position.wrt( /* )
+	endif
+	!this.textFromEast.val			=		!roots[2].east
+	!this.textFromNorth.val			=		!roots[2].north
+	!this.textFromUp.val			=		!roots[2].up
+	!this.textToEast.val			=		!roots[4].east
+	!this.textToNorth.val			=		!roots[4].north
+	!this.textToUp.val				=		!roots[4].up
+	!this.MethodShowAidBox()
+endmethod
+---------------------------------------------------------------------------
+--添加drawlist
+define method .MethodAddDrawListMember()
+	!type = !!ce.type
+	if(!type ne 'GPWL' and !type ne 'GPSET' and !type ne 'SITE' and !type ne 'ZONE' and !type ne 'PIPE' and !type ne 'EQUI' and !type ne 'STRU' and !type ne 'HVAC' and !type ne 'REST')then
+		return
+	endif
+	!drawList	=	!this.listDrawList.dtext
+	!drawList.append(name)
+	!drawList.unique()
+	!this.listDrawList.dtext	=	!drawList
+endmethod
+---------------------------------------------------------------------------
+--添加drawlist
+define method .MethodAddRemoveListMember()
+	!type = !!ce.type
+	if(!type ne 'GPWL' and !type ne 'GPSET' and !type ne 'SITE' and !type ne 'ZONE' and !type ne 'PIPE' and !type ne 'EQUI' and !type ne 'STRU' and !type ne 'HVAC' and !type ne 'REST')then
+		return
+	endif
+	!drawList	=	!this.listRemoveList.dtext
+	!drawList.append(name)
+	!drawList.unique()
+	!this.listRemoveList.dtext	=	!drawList
+endmethod
+---------------------------------------------------------------------------
+--清除当前
+define method .MethodClearDrawListMember()
+	!drawList	=	!this.listDrawList.dtext
+	!select		=	!this.listDrawList.val
+	!drawList.DeleteFrom(!select,1)
+	handle any
+		return
+	endhandle
+	!this.listDrawList.dtext	=	!drawList
+endmethod
+---------------------------------------------------------------------------
+--清除当前
+define method .MethodClearRemoveListMember()
+	!drawList	=	!this.listRemoveList.dtext
+	!select		=	!this.listRemoveList.val
+	!drawList.DeleteFrom(!select,1)
+	handle any
+		return
+	endhandle
+	!this.listRemoveList.dtext	=	!drawList
+endmethod
+---------------------------------------------------------------------------
+--清除所有
+define method .MethodClearDrawListAll()
+	!this.listDrawList.Clear()
+endmethod
+---------------------------------------------------------------------------
+--清除所有
+define method .MethodClearRemoveListAll()
+	!this.listRemoveList.Clear()
+endmethod
+---------------------------------------------------------------------------
+--加载Drawlist文件
+define method .MethodLoadDrawlistFile()
+	!filePath = !this.textDrawlistConfig.val
+	!viewList = object array()
+	!xmlGenerator = object XmlGenerator()
+	!tempArray = !xmlGenerator.LoadXmlFile(!filePath)
+	!this.listDrawList.clear()
+	!this.listDrawList.dtext =  !tempArray[1]
+	
+	!this.listRemoveList.clear()
+	!this.listRemoveList.dtext =  !tempArray[2]
+
+	!this.memberViewList.clear()
+	!this.memberViewList =  !tempArray[3]
+	
+	!this.listViewList.clear()
+	do !i indices !this.memberViewList
+		!viewListTemp[1]	=	!i.string()
+		!viewListTemp[2]	=	!this.memberViewList[$!i].viewName
+		!viewList.append(!viewListTemp)
+	enddo
+	!this.listViewList.setRows(!viewList)
+endmethod
+---------------------------------------------------------------------------
+--设置drawlist的配置文件
+define method .MethodOpenDrawlistFile()
+	using namespace 'Aveva.Pdms.Presentation'
+	!browser = object PMLFILEBROWSER('SAVE')
+	var !userEvar '%PDMSUSER%'
+	!browser.show(!userEvar, 'Drawlist.xml', 'Drawlist file', false, 'xml files (*.xml)|*.xml', 2)
+	!outFileName = !browser.file()
+	if (!outFileName eq '') then
+  		!this.textDrawlistConfig.val = '%PDMSUSER%\Drawlist.xml'
+	else
+		!this.textDrawlistConfig.val = !outFileName
+	endif
+endmethod
+---------------------------------------------------------------------------
+--输出drawlist的配置文件
+define method .MethodExportDrawlistFile()
+	!drawlist = !this.listDrawList.dtext
+	!removelist = !this.listRemoveList.dtext
+	!filePath = !this.textDrawlistConfig.val
+	!viewConfigList = !this.memberViewList
+	
+	!xmlGenerator = object XmlGenerator()
+	!xmlGenerator.GenerateXmlFile(!drawlist,!removelist,!viewConfigList,!filePath)
+endmethod
+---------------------------------------------------------------------------
+--设置drawing的尺寸
+define method .MethodSetDrawingSize()
+	!drawingSize						=					!this.optionDrawingSize.selection()
+	!this.textDrawingSize.val			=					!drawingSize
+	!this.textDrawingSize.Editable		=					false
+	!this.textDrawingSize.SetEditable(false)
+	!positionX							=					!drawingSize.before(' ').real()
+	!positionY							=					!drawingSize.after(' ').real()
+	!this.textViewPositionX.val			=					!positionX / 2
+	!this.textViewPositionY.val			=					!positionY / 2
+	--【本次修改·按你的要求】表格原点不再写进输入框（Tables 页已删）：
+	--   现在由 TableOrigin() 按当前图幅现算 —— Y = 图幅高 − 70、支架表 X = 图幅宽 − 139、其余 X = 30。
+endmethod
+---------------------------------------------------------------------------
+--计算View的比例
+define method .MethodNearViewSize()
+	!scaleListString		=		|1/2/5/10/15/20/25/30/40/50/75/80/100/150/200/300/350/400/450/500/550/600|
+	!scaleListArray			=		!scaleListString.split('/')
+	!drawingSizeX			=		!this.textDrawingSize.val.before(' ').real()
+	!drawingSizeY			=		!this.textDrawingSize.val.after(' ').real()
+	
+	!direction				=		!this.optionDirection.selection()
+	if(!direction eq 'D' or !direction eq 'U')then
+		do !scale value !scaleListArray
+			!xValue = abs(!this.textFromEast.val - !this.textToEast.val)	/	!scale.real()
+			!yValue = abs(!this.textFromNorth.val - !this.textToNorth.val)	/	!scale.real()
+			if(!xValue lt !drawingSizeX and !yValue lt !drawingSizeY)then
+				!this.textViewSizeX.val = !xValue
+				!this.textViewSizeY.val = !yValue
+				!this.textScale.val = !scale.real()
+				break
+			endif
+		enddo
+	elseif(!direction eq 'N' or !direction eq 'S')then
+		do !scale value !scaleListArray
+			!xValue = abs(!this.textFromEast.val - !this.textToEast.val)	/	!scale.real()
+			!yValue = abs(!this.textFromUp.val - !this.textToUp.val)	/	!scale.real()
+			if(!xValue lt !drawingSizeX and !yValue lt !drawingSizeY)then
+				!this.textViewSizeX.val = !xValue
+				!this.textViewSizeY.val = !yValue
+				!this.textScale.val = !scale.real()
+				break
+			endif
+		enddo
+	elseif(!direction eq 'E' or !direction eq 'W')then
+		do !scale value !scaleListArray
+			!xValue = abs(!this.textFromNorth.val - !this.textToNorth.val)	/	!scale.real()
+			!yValue = abs(!this.textFromUp.val - !this.textToUp.val)	/	!scale.real()
+			if(!xValue lt !drawingSizeX and !yValue lt !drawingSizeY)then
+				!this.textViewSizeX.val = !xValue
+				!this.textViewSizeY.val = !yValue
+				!this.textScale.val = !scale.real()
+				break
+			endif
+		enddo
+	else
+		do !scale value !scaleListArray
+			!xLen = abs(!this.textFromEast.val - !this.textToEast.val)	/	!scale.real()
+			!yLen = abs(!this.textFromNorth.val - !this.textToNorth.val)	/	!scale.real()
+			!zLen = abs(!this.textFromUp.val - !this.textToUp.val)	/	!scale.real()
+			!xValue = 0.866025 * (!xLen + !yLen)
+			!yValue = 0.5 * (!xLen + !yLen) + !zLen
+			
+			if(!xValue lt !drawingSizeX and !yValue lt !drawingSizeY)then
+				!this.textViewSizeX.val = !xValue
+				!this.textViewSizeY.val = !yValue
+				!this.textScale.val = !scale.real()
+				break
+			endif
+		enddo
+	endif
+endmethod
+---------------------------------------------------------------------------
+--计算View的比例
+define method .MethodReSize()
+	!direction				=		!this.optionDirection.selection()
+	!scale					=		!this.textScale.val
+	if(!direction eq 'D' or !direction eq 'U')then
+		!xValue = abs(!this.textFromEast.val - !this.textToEast.val)	/	!scale
+		!yValue = abs(!this.textFromNorth.val - !this.textToNorth.val)	/	!scale
+	elseif(!direction eq 'N' or !direction eq 'S')then
+		!xValue = abs(!this.textFromEast.val - !this.textToEast.val)	/	!scale
+		!yValue = abs(!this.textFromUp.val - !this.textToUp.val)	/	!scale
+	elseif(!direction eq 'E' or !direction eq 'W')then
+		!xValue = abs(!this.textFromNorth.val - !this.textToNorth.val)	/	!scale.real()
+		!yValue = abs(!this.textFromUp.val - !this.textToUp.val)	/	!scale.real()
+	else
+		!xLen = abs(!this.textFromEast.val - !this.textToEast.val)	/	!scale.real()
+		!yLen = abs(!this.textFromNorth.val - !this.textToNorth.val)	/	!scale.real()
+		!zLen = abs(!this.textFromUp.val - !this.textToUp.val)	/	!scale.real()
+		!xValue = 0.866025 * (!xLen + !yLen)
+		!yValue = 0.5 * (!xLen + !yLen) + !zLen
+	endif
+	
+	!this.textViewSizeX.val = !xValue
+	!this.textViewSizeY.val = !yValue
+	
+endmethod
+---------------------------------------------------------------------------
+--获取当前切图的范围
+define method .MethodDrawlistScope()
+	
+	!fmsystem = object FMSYS()
+	!models = !this.listDrawList.dtext
+	!form = !fmSystem.currentDocument()
+	!drawlist = !!gphDrawlists.drawlist(!form.view)
+	!list = !drawlist.members()
+	!volume = object volume(!list)
+	handle any
+		return
+	endhandle
+	!volumeFromPosition				=		!volume.from
+	!volumeToPosition				=		!volume.to
+	!this.textFromEast.val			=		!volumeFromPosition.east
+	!this.textFromNorth.val			=		!volumeFromPosition.north
+	!this.textFromUp.val			=		!volumeFromPosition.up
+	!this.textToEast.val			=		!volumeToPosition.east
+	!this.textToNorth.val			=		!volumeToPosition.north
+	!this.textToUp.val				=		!volumeToPosition.up
+	
+	!this.MethodShowAidBox()
+endmethod
+---------------------------------------------------------------------------
+--获取当前切图的范围
+define method .MethodCurrentScope()
+	var !name flnn
+	
+	!volume = object volume(!!ce)
+	handle any
+		return
+	endhandle
+	!volumeFromPosition				=		!volume.from
+	!volumeToPosition				=		!volume.to
+	!this.textFromEast.val			=		!volumeFromPosition.east
+	!this.textFromNorth.val			=		!volumeFromPosition.north
+	!this.textFromUp.val			=		!volumeFromPosition.up
+	!this.textToEast.val			=		!volumeToPosition.east
+	!this.textToNorth.val			=		!volumeToPosition.north
+	!this.textToUp.val				=		!volumeToPosition.up
+	
+	!this.textDrawingName.val			=		!name + '_Drwg'
+	!this.MethodShowAidBox()
+endmethod
+--【本次修改·按你的要求】NewView 按钮与 .MethodNewView() 已删除（该按钮只做"按当前设置新建一个 VIEW"，
+--   与 Generate 流程重复，平时用不上）。Generate / SaveView / UpdateView / CopyView 不受影响。
+
+---------------------------------------------------------------------------
+--生成
+define method .MethodGenerateView()
+	!regi								=	!this.textRegi.val
+	----------------------------------------------------------------------------
+	--【本次新增·按你的要求】建图之前先判断"同名 DRWG 是否已存在"：
+	--   存在 → 弹确认框；选"是"就把它删掉再继续建新图，选"否"直接 return（什么都不做）。
+	--   · 路径统一补成绝对路径（本工程 `textDrawingName` 不带前导 '/'，但为稳妥仍判断一次，
+	--     避免又拼出 `//名字` —— 这个坑在 23.25 记过）；
+	--   · 存在性判断用 `路径.dbref()` + handle 兜底（`.dbref()` 找不到会报错，与 23.5 的做法一致）；
+	--   · 删除写法照抄 AVEVA 自己的删图函数 MdsAbaDelDrwg.pmlfnc：
+	--       `!!CE = <DRWG>` → `delete DRWG`，若报 (2,18)（元素被锁）则 `unlock all` 后重试一次，再失败就报错返回；
+	--     确认框也用那里同款 `!!alert.confirm(...).boolean()`（另一处常见写法是 `.eq('YES')`，两者都可用）；
+	--   · 提示文字用英文：中文在 PDMS 弹窗里同样有编码显示问题（与 23.20 进度栏同一原因）。
+	!checkName = !this.textDrawingName.val
+	!checkPath = !checkName
+	!hasSlashChk = false
+	if(!checkPath.before('/') eq '')then
+		!hasSlashChk = true
+	endif
+	if(!hasSlashChk.not())then
+		!checkPath = '/' + !checkPath
+	endif
+	!oldDrwgExists = true
+	!oldDrwg = !checkPath.dbref()
+	handle any
+		!oldDrwgExists = false
+	endhandle
+	if(!oldDrwgExists)then
+		!question = 'Drawing ' + !checkName + ' already exists. Delete it and create a new one?'
+		if(!!alert.confirm(!question).boolean().not())then
+			return
+		endif
+		-- 删除：CE 指到那个 DRWG 再 delete DRWG
+		!!ce = !oldDrwg
+		!delOk = true
+		delete DRWG
+		handle any
+			!delOk = false
+		endhandle
+		if(!delOk)then
+			-- 常见原因是元素被锁住（(2,18)）：解锁后重试一次
+			unlock all
+			!delOk = true
+			delete DRWG
+			handle any
+				!delOk = false
+			endhandle
+		endif
+		if(!delOk)then
+			!!alert.error('Failed to delete the existing drawing: ' + !checkPath)
+			return
+		endif
+	endif
+	----------------------------------------------------------------------------
+	!drawingGenerator					=	object DrawingGenerator()
+	!drawingGenerator.drawingName		=	!this.textDrawingName.val
+	!drawingGenerator.drawingSize		=	!this.textDrawingSize.val
+	!drawingGenerator.drawlist			=	!this.listDrawList.dtext
+	!drawingGenerator.removelist		=	!this.listRemoveList.dtext
+	--【本次新增·按你的要求】图纸种类（Layout 选项）传给建图对象：
+	--   EquiLayout = 设备布置图：颜色规则里只有设备有颜色，其余灰 1 号。
+	!layoutKind = !this.optionLayoutKind.selection()
+	!drawingGenerator.layoutKind = !layoutKind
+	--【2026-10-31·按你的要求】真正开始建图前清空两个 list，等出表时再按当前图纸种类重新填；
+	--   放在这里而不是方法开头：万一“同名图纸已存在”你选了否，就不应该把现有列表清掉。
+	!this.listPipeTable.clear()
+	!this.listSuppTable.clear()
+	$!regi
+	!drawingGenerator.Generate()
+
+	!viewList = !this.memberViewList
+	!sel = !this.listViewList.val
+	--【23.162 删除】原来这里有一句 !sheetList = !this.memberViewList，
+	--   赋值后全方法再没被读过（死变量），删之；下面用的是 !viewList。
+	!SheetGenerator						=	object SheetGenerator()
+	
+	!SheetGenerator.drawingName			=	!this.textDrawingName.val
+	!SheetGenerator.sheetName			=	!this.textDrawingName.val + '/S'
+	!SheetGenerator.sheetSize			=	!this.textDrawingSize.val
+	
+	!SheetGenerator.viewPositionFrom	=	!viewList[$!sel].viewLimitFrom
+	!SheetGenerator.viewPositionTo		=	!viewList[$!sel].viewLimitTo
+	!viewSize							=	object array()
+	!viewSize[1]						=	!this.textViewSizeX.val.STRING()
+	!viewSize[2]						=	!this.textViewSizeY.val.STRING()
+	!SheetGenerator.viewSize			=	!viewSize
+	!viewPosition						=	object array()
+	!viewPosition[1]					=	!this.textViewPositionX.val.STRING()
+	!viewPosition[2]					=	!this.textViewPositionY.val.STRING()
+	!SheetGenerator.viewPosition		=	!viewPosition
+	!SheetGenerator.viewDirection		=	!this.optionDirection.selection()
+	!SheetGenerator.viewScale			=	!this.textScale.val.STRING()
+	!SheetGenerator.viewType			=	!this.optionViewType.selection()
+	
+	!SheetGenerator.Generate('SHEE')
+	
+	---------------------------------------------------------------------------
+	--【本次修改】把 Test 按钮的自动标注并入 Generate
+	-- 问题：原来点 Generate 只建图（DRWG/SHEET/VIEW），标注必须再点一次 Test。
+	-- 现在：建完图后紧接着跑同一套标注流程（与原来 Test 按钮跑的标注流程完全一致），
+	--       只额外加了两处保护：
+	--         ① 切不到视图时提示并返回（不让标注失败盖掉"图已建好"这件事）；
+	--         ② 未设置 GRID（轴网）时跳过尺寸标注并提示 —— 老逻辑里
+	--            `!gridstring.dbref()` 在轴网为空时会报错，把整段标注带断。
+	-- Test 按钮保留：用于在同一张视图上单独重跑标注（不重新建图）。
+	--【第2版修订】取视图改为**显式路径**，不依赖"当前视图"是谁
+	-- 第1版这里写的是 `view` + `!view = !!ce`：DrawingGenerator/SheetGenerator 内部最后
+	-- 停在 SHEET / 最后创建的图层上，`view` 取到的未必是刚建好的这张视图 —— 实测表现为
+	-- "第一次点 Generate 标注不生效，要再点一次"。改为按 /<图名>/S/V 显式定位。
+	!viewPath = '/' + !this.textDrawingName.val + '/S/V'
+	!viewOk = true
+	!view = !viewPath.dbref()
+	-- 【PML 语义提醒】handle 覆盖的是它前面的语句（依据 AVEVA 自带代码
+	-- chkruledata.pmlfrm:772-780 的用法），所以危险语句写在 handle 之前。
+	handle any
+		!viewOk = false
+	endhandle
+	if(!viewOk.not())then
+		$p New view not found - automatic annotation skipped.
+		$p Expected view path:
+		$p $!viewPath
+		return
+	endif
+	-- 把"当前元素"切到该视图：LabelGenerator 建图层用的是相对路径 <view.name>/xxx，
+	-- 必须与 Test 按钮执行时的上下文一致
+	$!viewPath
+	!gridstring = !this.textGrid.val
+	!gridOk = true
+	if(!gridstring.unset())then
+		!gridOk = false
+	elseif(!gridstring.length() lt 1)then
+		!gridOk = false
+	else
+		!grids = !gridstring.dbref()
+		handle any
+			!gridOk = false
+		endhandle
+	endif
+	!labelGenerator = object LabelGenerator()
+	!labelGenerator.view = !view
+	--【本次新增·按你的要求】EquiLayout：只出设备名标注（不出管道/支架/仪表/管口标注）
+	!labelGenerator.layoutKind = !layoutKind
+	!noteGenerator = object NoteGenerator()
+	!noteGenerator.view = !view
+	--【本次新增·按你的要求】EquiLayout：设备注释改成图面直接标设备名
+	!noteGenerator.layoutKind = !layoutKind
+	--【本次新增·按你的要求】Drawing Setting 里的 Layout 选项决定这次生成什么：
+	--   General                              = 只生成图面（标注、表格全部跳过）；
+	--   PipeLayout / EquiLayout / InstLayout = 与原来完全一致（全套标注 + 自动出表）；
+	--   NozzleLayout(Vertical)          = 只出**立式**设备的管口方位图；
+	--   NozzleLayout(Horizontal)        = 只出**卧式**设备的管口方位图。
+	--   后两种模式：管口名注记 + 方位角扇形线 + 管口方位表，**不**跑管线/支架/仪表标注，
+	--   也不做尺寸与范围标记 —— 与老版两条独立入口（mnozzapply → mvnozzapply / mhnozzapply）
+	--   的用法一致：管口方位图本来就是单独一张图。
+	--   立式/卧式的判定读设备自身属性 EQUI.ORIE（见 NozzleOrientationGenerator.DetectOrientation）。
+	!layoutKind = !this.optionLayoutKind.selection()
+	!nozzOrie = ''
+	if(!layoutKind eq 'NozzleLayout(Vertical)')then
+		!nozzOrie = 'VERTICAL'
+	elseif(!layoutKind eq 'NozzleLayout(Horizontal)')then
+		!nozzOrie = 'HORIZONTAL'
+	endif
+	if(!nozzOrie ne '')then
+		!this.MethodNozzleOrieFor(!view,!nozzOrie)
+	elseif(!layoutKind ne 'General')then
+	!labelGenerator.Generate()
+	!noteGenerator.Generate()
+	--【23.153 修改·按你的要求】没设 GRID 时**不再整段跳过尺寸 / 引线标注** ——
+	--   只跳过**轴网那一层**：不设 .grid，DimensionGenerator.GetGrid() 会返回 4 个空数组，
+	--   设备层 / 管道层照常生成；轴网中心线那边自己会 `!grid.unset()` 跳过。
+	--   （原来这里走 else 分支、连 `!dimensionGenerator.Generate()` 都不调 —— 那是设计错误，
+	--     表现为"GRID 一空，尺寸标注和引线标注全没了"。）
+	!dimensionGenerator = object DimensionGenerator()
+	!dimensionGenerator.view  = !view
+	if(!gridOk)then
+		!dimensionGenerator.grid  = !grids
+	endif
+	--【本次新增·按你的要求】EquiLayout：外围标注只两层（外=轴网、内=设备）
+	!dimensionGenerator.layoutKind = !layoutKind
+	--【本次新增·按你的要求】设备 EL / 管道 BOP EL 标注同样要减相对标高
+	!dimensionGenerator.relative = !this.RelativeElevation()
+	!dimensionGenerator.Generate()
+	--【本次新增】范围标记 + 北向标：并入生成流程（按你的要求）
+	--   原先要点界面上的 Limits 页按钮（该页已去掉），现在点 Generate 一次做完。
+	--   失败不打断流程（缺符号库只打印警告，四角范围标记仍会画出来）。
+	!this.MethodLimitsNoteFor(!view)
+	--【本次新增】自动出表：支架表 + 管线表（数据取自刚建好的这张视图，与标注同源）
+	!this.MethodAutoTables(!view)
+	endif
+	--【第2版修订】刷新图纸，让刚生成的标注与表格立即显示
+	-- SheetGenerator.Generate 内部的刷屏发生在"建图结束"时，早于本段标注/表格，
+	-- 所以必须在这里再刷新一次，否则要等下一次操作才看得见。
+	!SheetGenerator.sheetupdate()
+endmethod
+---------------------------------------------------------------------------
+--设置GRID位置
+define method .MethodGrid()
+	!name = !!ce.name
+	!this.textGrid.val = !name
+endmethod
+---------------------------------------------------------------------------
+--这个设置drawing获取存放位置
+define method .MethodRegi()
+	!type = !!ce.type
+	if(!type eq 'REGI')then
+		!name = !!ce.name
+		!this.textRegi.val = !name
+	else
+		!!alert.Message('Please select REGI')
+	endif
+endmethod
+---------------------------------------------------------------------------
+--显示范围
+define method .MethodShowAidBox()
+	aid clear all
+	!xlen = abs(!this.textToEast.val - !this.textFromEast.val)
+	handle any
+		return
+	endhandle
+	!ylen = abs(!this.textToNorth.val - !this.textFromNorth.val)
+	!zlen = abs(!this.textToUp.val - !this.textFromUp.val)
+	!xcenter = (!this.textToEast.val + !this.textFromEast.val) / 2
+	!ycenter = (!this.textToNorth.val + !this.textFromNorth.val) / 2
+	!zcenter = (!this.textToUp.val + !this.textFromUp.val) / 2
+	aid box number 1 pos x $!xcenter y $!ycenter z $!zcenter wrt /* xlen $!xlen ylen $!ylen zlen $!zlen fill off
+endmethod
+
+---------------------------------------------------------------------------

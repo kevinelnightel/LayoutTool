@@ -1,0 +1,3120 @@
+﻿define object LabelGenerator
+	member .view is dbref
+	--【本次新增·按你的要求】图纸种类（Drawing Setting 的 Layout 选项）：
+	--   'EquiLayout'（设备布置图）= 只出**设备名标注**（文字取 .flnn、字号 5mm），
+	--   不出仪表/支架/管口/管道标注；四种原有标注的行为不变。
+	member	.layoutKind		is	string
+	--【23.155 新增·按你的要求】贪心避让的**可调参数**（默认值在 AnnotationOptimization() 里填；
+	--   想调数值只改那一处，或在调用前先给这些成员赋值）。原值与回退见 backup\GreedyParams_before_*.txt。
+	member	.greedyTier			is	real	$* 几圈候选（原 3）
+	member	.greedyGap			is	real	$* 每圈递进 mm（原 7）
+	member	.greedyOverlapR2	is	real	$* 重叠判据半径平方 mm²（原 81 = 9mm）
+	member	.greedyOccludeR2	is	real	$* 遮挡判据半径平方 mm²（原 25 = 5mm）
+	member	.greedyFrameCost		is	real	$* 超出图幅代价（原 50）
+	member	.greedyCrossCost		is	real	$* 引线交叉代价（原 100）
+	member	.greedyNeighbourR2	is	real	$* 参与比较的近邻半径平方 mm²（原 3000 ≈ 55mm）
+	--【2026-10-31·按你的要求】代价权重（重罚=几乎不允许）。
+	member	.penOverlap		is	real	$* ① 标注框重叠
+	member	.penAnchor		is	real	$* ② 框盖住对方标注的起始点
+	member	.penSelfAnchor	is	real	$* ②b 框盖住自己的起始点
+	member	.penCross		is	real	$* ③ 引线与引线相交
+	member	.penCrossBox	is	real	$* ④ 引线穿过对方标注框
+	member	.penFrame		is	real	$* ⑤ 超出图框
+	member	.distCost		is	real	$* ⑥ 离锚点每 mm 的代价
+	--【2026-10-31·按你的要求】贪心之后的两步优化
+	member	.repairPasses	is	real	$* 冲突消除的迭代轮数
+	member	.repairDirs		is	array	$* 冲突消除用的候选方向（懒建）
+	--【2026-10-31·按你的要求】模拟退火（阈值接受变体：PML 没有 exp/random）
+	member	.annealIterations is	real	$* 迭代次数
+	member	.annealTemp0		is	real	$* 初温
+	member	.annealCooling	is	real	$* 每步降温系数
+	member	.annealAccepted	is	real	$* 上一次退火接受了多少次（诊断用）
+	member	.annealRadius		is	real	$* 局部代价只算这个半径内的标注（图面 mm）
+	--【2026-10-31·方案A】图面几何障碍（管线中线 + 设备轮廓），坐标已换算成图面 mm
+	member	.obsSegs		is	array
+	member	.obsGrid		is	array
+	--【2026-10-31·按你的要求】设备/仪表/阀门/管件是**实心区域**，不能只判四条边：
+	--   只判边的话，标注落在大设备**内部**时一点也不会被判为压住（这就是之前点在罐体里的原因）。
+	member	.obsRects		is	array
+	member	.obsRectGrid	is	array
+	member	.obsCell		is	real
+	member	.obsMinX		is	real
+	member	.obsMinY		is	real
+	member	.obsCols		is	real
+	member	.obsRows		is	real
+	member	.obsScale		is	real
+	member	.obsCE			is	real
+	member	.obsCN			is	real
+	member	.obsReady		is	boolean
+	--【2026-10-31·按你的要求】视图范围（模型坐标）：设备只取**和范围的交集**，
+	--   不能用整个 EQUI 包围盒（设备只进来一部分时会把图面大片区域都判成障碍）。
+	member	.obsLimE1		is	real
+	member	.obsLimE2		is	real
+	member	.obsLimN1		is	real
+	member	.obsLimN2		is	real
+	member	.geomQueries	is	real	$* 诊断：BoxHitPen 被调用次数
+	member	.penGeometry	is	real	$* 标注框压住图面几何的代价
+	member	.geomInset		is	real	$* 判交时把框缩进多少 mm（允许轻微贴边）
+	member	.geomMaxDetour	is	real	$* 为躲几何最多多付多少代价（超了就不躲）
+	--【2026-10-31】被大设备整个盖住时的“出口搜索”：候选距离远超 tier×gap（36mm），
+	--   不做这个就永远跑不出大瓶体的包围盒。
+	member	.escapeRadii	is	array	$* 出口搜索半径（图面 mm）
+	member	.escapeMinPen	is	real	$* 挡住的东西罚金低于这个就不值得飞出去（设备/管线低优先级）
+	member	.crossFixRadii	is	array	$* 专门为“消除交叉”而试的远移半径（图面 mm）
+	--【2026-10-31·性能】
+	member	.greedyMaxNeigh	is	real	$* 只计算最近的几个邻居（控制 CostCalculation 调用数）
+	member	.greedyFastCost	is	real	$* 第一档（12 个方向×1 圈）就够好的代价阈值
+	member	.penGeomPipe	is	real	$* 压管线中线的代价（低）
+	member	.penGeomInst	is	real	$* 压仪表符号的代价
+	member	.penGeomValv	is	real	$* 压阀门符号的代价
+	member	.penGeomEqui	is	real	$* 压设备轮廓的代价
+	member	.equiShrink	is	real	$* 设备包围盒收缩系数（包围盒常把平台/梯子算进去，偏大）
+	--【2026-10-31】标注框余量（不同标注对象按各自 CHEI 估，再加这个余量）
+	member	.boxPadX		is	real
+	member	.boxPadY		is	real
+	--【2026-10-31·按你的说明】外围标注的几何参数（由 GenerateEquiPlateLabels 每次填）
+	member	.plateFromE		is	real
+	member	.plateFromN		is	real
+	member	.plateToE		is	real
+	member	.plateToN		is	real
+	member	.plateMargin		is	real
+	member	.plateSpace		is	real
+	--【2026-10-31】图面比例（vscale）：模型 mm × 它 = 图面 mm，SLABEL 的坐标是图面 mm
+	member	.sheetScale		is	real
+	--【23.162 新增·性能】图幅矩形缓存（.PrepareCostContext() 里算一次）。
+	--   原来 CostCalculation 每次调用都读 4 次数据库属性（view.xypos / view.size），
+	--   而它是贪心的最内层：标注数 × 半径内邻居数 × 48 个候选 = 十万到百万次调用。
+	--   图幅在一次出图里不会变，所以提到最外层算一次。
+	member	.frameCX	is	real	$* 视图中心的 east
+	member	.frameCY	is	real	$* 视图中心的 north
+	member	.frameHX	is	real	$* 半幅宽
+	member	.frameHY	is	real	$* 半幅高
+	--【23.164 新增】当前正在放置的标注 / 正在比较的已放置标注的文字外框（mm）。
+	--   代价函数是最内层，用成员传两个外框比加参数安全（不会踩 (2,779) 签名不匹配）。
+	member	.curXLen	is	real
+	member	.curYLen	is	real
+	member	.exXLen	is	real
+	member	.exYLen	is	real
+endobject
+--------------------------------------------------------------------------------------
+define method .Generate()
+	--【本次修改·按你的要求】不再把各类标注用 if(!equiMode.not()) 夹在同一个方法里，
+	--   改成 **按图纸种类分派到各自的方法**，两类图纸互不影响：
+	--     · Layout = EquiLayout（设备布置图）→ GenerateEquiLayout()：设备名标注 + 管口标注；
+	--     · 其它所有图种（管道平面布置图等）→ GeneratePipeLayout()：四类标注与老版一致。
+	--   这样以后改设备布置图，不可能再碰到管道图的那几段代码。
+	!layoutKind = !this.layoutKind
+	if(!layoutKind.unset())then
+		!layoutKind = ''
+	endif
+	if(!layoutKind eq 'EquiLayout')then
+		!this.GenerateEquiLayout()
+	elseif(!layoutKind eq 'InstLayout')then
+		!this.GenerateInstLayout()
+	else
+		!this.GeneratePipeLayout()
+	endif
+endmethod
+--------------------------------------------------------------------------------------
+-- 管道平面布置图（以及除设备布置图以外的所有图种）：四类标注 INST/SUPP/NOZZ/PIPE
+define method .GeneratePipeLayout()
+	!view = !this.view
+	!viewAnnoArray = object array()
+	!viewAnno = object ViewAnnotation()
+	--【本次新增·按你的要求】分别记住三类标注的 SLABEL dbref，最后按 xypos 方位发 Cpoffset。
+	--   为什么在这里顺手收集、而不是最后重新 coll：
+	--   AnnotationOptimization 结束时 !!ce 停在某个标注上，那时再用相对图层名去 coll
+	--   会解析到别处；在各自已验证可用的收集循环里存 dbref 最稳。
+	!instSlabs = object array()
+	!suppSlabs = object array()
+	!pipeSlabs = object array()
+	!equiSlabs = object array()
+	!limitDbelementGet = object LimitDbelementGet()
+	!limitDbelementGet.view = !view
+	!volume = !limitDbelementGet.GetVolume()
+	!drawingName = !view.owner.owner.name
+	!viewName = !view.name
+	--【报错修复】(2,751) Variable !PERCENT does not exist（在 Generate 第 35 行）
+	--   原因：第 35 行在**循环之后**又用了一次 !percent，而 !percent 只在循环体里赋值。
+	--   当仪表清单为空（图纸里没有 INST 元件）时循环体一次都不执行 →
+	--   !percent 从未被赋值 → 传参时报"变量不存在"。
+	--   修法：开头先给初值 0。空清单时第 35 行就等于 SETPROGRESS(0)
+	--   （与后面四个块结尾的写法一致），非空时仍是"跑完显示 100"的原意。
+	--   【为什么不用 handle】这是本方法自身的逻辑漏洞，不是外部不可控状况：
+	--   加 handle 只是把错误吞掉，还会连带掩盖这一段里真正的故障
+	--   （取数失败/图层建失败/生成注释失败）而不报错。判断依据见 PORTING_LOG 23.17。
+	!percent = 0
+	
+
+	--【本段=仪表标注 INST】原 Generate 里的这一段，逻辑原样未改
+	!list = !limitDbelementGet.GetDrawListElement('INST')			$*获取仪表
+	!labelName = !drawingName + '/INSTLABELS/INST'
+	!labelType = !labelName.dbref()
+	!layerName = !viewName + '/INST_Labs'
+	!this.LayerGenerate(!layerName)
+	--【本次修改】进度栏文字由中文改成英文（共 5 处：INST/SUPP/NOZZ/PIPE/优化排布）
+	--   原因：`!!fmsys.SETPROGRESSTEXT()` 的文本有时显示成乱码（进度栏那个控件对
+	--   非 ASCII 的处理不稳定），中文在不同机器/会话上时好时坏，英文则一直正常。
+	--   这 5 处是全插件**唯一**会显示出来的中文字符串（其余中文都在注释里，不参与显示，
+	--   已用脚本核查过）。原来的中文文案与对应关系：
+	--     正在生成图面设备标注... → Generating instrument labels ...
+	--     正在生成图面支架标注... → Generating support labels ...
+	--     正在生成图面管口标注... → Generating nozzle labels ...
+	--     正在生成图面管道标注... → Generating pipe labels ...
+	--     正在优化图面标注布置... → Optimizing label layout ...
+	!!fmsys.SETPROGRESSTEXT('Generating instrument labels ...')
+	do !i indices !list
+		!percent = !i / !list.size() * 100
+		!!fmsys.SETPROGRESS(!percent)
+		!name = !list[$!i].flnn
+		!nameList = !name.split('-')
+		do !j indices !nameList
+			if(!j eq 1)then
+				!message = !nameList[$!j]
+			else
+				--【本次修改·按你的要求】#/ 后面若没内容，补一个空格（导出/居中时不会报错）
+				!part = !nameList[$!j]
+				if(!part.Empty())then
+					!part = ' '
+				endif
+				!message = !message + ' #/' + !part
+			endif
+		enddo
+		!this.GenerateNote(!list[$!i],!message,!labelType)
+	enddo
+	!!fmsys.SETPROGRESS(!percent)
+	var !slabs coll all slab for $!layerName
+	do !ptrslabs indices !slabs
+		!instSlabs.append(!slabs[$!ptrslabs].dbref())
+		--【23.164 修正·重叠根因】原来整个方法只在开头建**一个** ViewAnnotation，
+		--   这 7 个收集循环都往同一个对象里写、再 append 同一个引用 ——
+		--   PML 数组存 UDO 是引用语义（23.155 在 CostElement 上吃过同一个亏），
+		--   于是 viewAnnoArray 里 N 个元素指向同一个对象、只剩最后一串坐标，
+		--   贪心等于在跟一个幻影比较，最后也只有**一条**标注被 offset 挪动过 —— 重叠就是这么来的。
+		--   现在每个标注各建一个，顺带记下它自己的文字外框 (xLen/yLen)。
+		!annoSlab = !slabs[$!ptrslabs].dbref()
+		!viewAnno = object ViewAnnotation()
+		!annoExt = !this.LabelExtent(!annoSlab,2.5)
+		!viewAnno.xLen = !annoExt[1]
+		!viewAnno.yLen = !annoExt[2]
+		!viewAnno.dbElement = !annoSlab
+		!viewAnno.xPos			= !slabs[$!ptrslabs].dbref().ddnmx
+		!viewAnno.yPos			= !slabs[$!ptrslabs].dbref().ddnmy
+		!viewAnno.xOff			=	0
+		!viewAnno.yOff			=	0
+		!viewAnnoArray.append(!viewAnno)
+	enddo
+	
+
+	--【本段=支架标注 SUPP】原样
+	!list = !limitDbelementGet.GetDrawListElement('ATTA')				$*获取支架
+	!labelName = !drawingName + '/SUPPLABELS/SUPP'
+	!layerName = !viewName + '/SUPP_Labs'
+	!labelType = !labelName.dbref()
+	!!fmsys.SETPROGRESSTEXT('Generating support labels ...')
+	!this.LayerGenerate(!layerName)
+	do !i indices !list
+		if(!list[$!i].attype.matchwild(|*SUPP*|).not() and !list[$!i].attype.matchwild(|*HANG*|).not())then
+			!list.DeleteFrom(!i,1)
+		endif
+	enddo
+	!list.compress()
+	do !i indices !list
+		!percent = !i / !list.size() * 100
+		!!fmsys.SETPROGRESS(!percent)
+		!this.GenerateNote(!list[$!i],'$!i',!labelType)	
+	enddo
+	!!fmsys.SETPROGRESS(0)
+	var !slabs coll all slab for $!layerName
+	do !ptrslabs indices !slabs
+		--【23.164 修正·重叠根因】原来整个方法只在开头建**一个** ViewAnnotation，
+		--   这 7 个收集循环都往同一个对象里写、再 append 同一个引用 ——
+		--   PML 数组存 UDO 是引用语义（23.155 在 CostElement 上吃过同一个亏），
+		--   于是 viewAnnoArray 里 N 个元素指向同一个对象、只剩最后一串坐标，
+		--   贪心等于在跟一个幻影比较，最后也只有**一条**标注被 offset 挪动过 —— 重叠就是这么来的。
+		--   现在每个标注各建一个，顺带记下它自己的文字外框 (xLen/yLen)。
+		!annoSlab = !slabs[$!ptrslabs].dbref()
+		!viewAnno = object ViewAnnotation()
+		!annoExt = !this.LabelExtent(!annoSlab,2.5)
+		!viewAnno.xLen = !annoExt[1]
+		!viewAnno.yLen = !annoExt[2]
+		!viewAnno.dbElement = !annoSlab
+		!viewAnno.xPos			= !slabs[$!ptrslabs].dbref().ddnmx
+		!viewAnno.yPos			= !slabs[$!ptrslabs].dbref().ddnmy
+		!viewAnno.xOff			=	0
+		!viewAnno.yOff			=	0
+		!suppSlabs.append(!slabs[$!ptrslabs].dbref())
+		!viewAnnoArray.append(!viewAnno)
+	enddo
+	
+
+	--【2026-10-31·按你的要求】管道平面布置图**不生成管口(NOZZ)标注**（图面太乱）。
+	--   下面是原代码，整段注释保留、不删除；恢复办法：把每行行首的 '-- ' 去掉即可。
+	--   注意：只动了 GeneratePipeLayout()，设备布置图/仪表图里的管口标注不受影响。
+	--【本段=管口标注 NOZZ】原样；设备布置图里也用这一份
+	--【本次修改·按你的要求】管口(NOZZ)标注在设备布置图里**保留**（原先被 if(!equiMode.not()) 跳过）
+	--【23.154 修复·按你的反馈】本段标注的是**管口**，取数必须取 NOZZ ——
+	--   23.99 统一"设备取数口径"时把这一行误改成了 GetEquiInView()（取设备），
+	--   而下面三行是按管口写的（`name of equi of <管口>` 用来取父设备名去前缀），
+	--   拿设备当管口用 → !message 取空，而 23.111 起"空文字标注不创建"
+	--   → 图面上一条管口标注都没有（这正是你看到的现象）。
+	--   这里恢复母版写法（8/24 版 LabelGenerator.pmlobj 第 74 行）。
+	-- !list = !limitDbelementGet.GetDrawListElement('NOZZ')				$*获取管口
+	-- !labelName = !drawingName + '/NOZZLES/NOZZ'
+	-- !layerName = !viewName + '/NOZZ_Labs'
+	-- !labelType = !labelName.dbref()
+	-- !!fmsys.SETPROGRESSTEXT('Generating nozzle labels ...')
+	-- !this.LayerGenerate(!layerName)
+	-- do !i indices !list
+		-- !percent = !i / !list.size() * 100
+		-- !!fmsys.SETPROGRESS(!percent)
+		-- !nozzName = !list[$!i].name
+		-- !equiName = name of equi of $!nozzName
+		-- !message = !nozzName.replace(!equiName,'').replace('-','').replace('/','').replace('.','')
+		-- !this.GenerateNote(!list[$!i],!message,!labelType)
+	-- enddo
+	-- !!fmsys.SETPROGRESS(0)
+	-- var !slabs coll all slab for $!layerName
+	-- do !ptrslabs indices !slabs
+		--【23.164 修正·重叠根因】原来整个方法只在开头建**一个** ViewAnnotation，
+		--   这 7 个收集循环都往同一个对象里写、再 append 同一个引用 ——
+		--   PML 数组存 UDO 是引用语义（23.155 在 CostElement 上吃过同一个亏），
+		--   于是 viewAnnoArray 里 N 个元素指向同一个对象、只剩最后一串坐标，
+		--   贪心等于在跟一个幻影比较，最后也只有**一条**标注被 offset 挪动过 —— 重叠就是这么来的。
+		--   现在每个标注各建一个，顺带记下它自己的文字外框 (xLen/yLen)。
+		-- !annoSlab = !slabs[$!ptrslabs].dbref()
+		-- !viewAnno = object ViewAnnotation()
+		-- !annoExt = !this.LabelExtent(!annoSlab,2.5)
+		-- !viewAnno.xLen = !annoExt[1]
+		-- !viewAnno.yLen = !annoExt[2]
+		-- !viewAnno.dbElement = !annoSlab
+		-- !viewAnno.xPos			= !slabs[$!ptrslabs].dbref().ddnmx
+		-- !viewAnno.yPos			= !slabs[$!ptrslabs].dbref().ddnmy
+		-- !viewAnno.xOff			=	0
+		-- !viewAnno.yOff			=	0
+		-- !viewAnnoArray.append(!viewAnno)
+	-- enddo
+	
+	--【本段=管线号标注 PIPE】原样
+	!list = !limitDbelementGet.GetDrawListElement('PIPE')				$*获取管件用来标注管道
+	!labelName = !drawingName + '/PIPELINELABELS/PIPE'
+	!layerName = !viewName + '/PIPE_Labs'
+	!labelType = !labelName.dbref()
+	!this.LayerGenerate(!layerName)
+	!!fmsys.SETPROGRESSTEXT('Generating pipe labels ...')
+	-- 标注编号用自己的计数器：保证 1..N 连续，且与管线表序号一一对应
+	!pipeNo = 0
+	do !i indices !list
+		!percent = !i / !list.size() * 100
+		!!fmsys.SETPROGRESS(!percent)
+		!pipeNo = !pipeNo + 1
+		var !branch coll all branch for $!list[$!i]
+		do !ptrBranch indices !branch
+			!point = !branch[$!ptrBranch].dbref().hpos.wrt(world)
+			!bool = !limitDbelementGet.IsPointWithinLimit(!point,!volume)
+			if(!bool)then
+				!this.GenerateNote(!branch[$!ptrBranch].dbref(),!pipeNo.string(),!labelType)
+				break
+			endif
+			var !branchmember coll all branch member for $!branch[$!ptrBranch]
+			do !ptrBranchmember indices !branchmember
+				if(!branchmember[$!ptrBranchmember].dbref().type eq 'TUBI' or !branchmember[$!ptrBranchmember].dbref().type eq 'ATTA')then
+					skip
+				endif
+				!point = !branchmember[$!ptrBranchmember].dbref().pos.wrt(world)
+				!bool = !limitDbelementGet.IsPointWithinLimit(!point,!volume)
+				if(!bool)then
+					!this.GenerateNote(!branchmember[$!ptrBranchmember].dbref(),!pipeNo.string(),!labelType)
+					golabel /PipeBreak
+				endif
+			enddo
+		enddo
+		label /PipeBreak
+	enddo
+	!!fmsys.SETPROGRESS(0)
+	var !slabs coll all slab for $!layerName
+	do !ptrslabs indices !slabs
+		--【23.164 修正·重叠根因】原来整个方法只在开头建**一个** ViewAnnotation，
+		--   这 7 个收集循环都往同一个对象里写、再 append 同一个引用 ——
+		--   PML 数组存 UDO 是引用语义（23.155 在 CostElement 上吃过同一个亏），
+		--   于是 viewAnnoArray 里 N 个元素指向同一个对象、只剩最后一串坐标，
+		--   贪心等于在跟一个幻影比较，最后也只有**一条**标注被 offset 挪动过 —— 重叠就是这么来的。
+		--   现在每个标注各建一个，顺带记下它自己的文字外框 (xLen/yLen)。
+		!annoSlab = !slabs[$!ptrslabs].dbref()
+		!viewAnno = object ViewAnnotation()
+		!annoExt = !this.LabelExtent(!annoSlab,2.5)
+		!viewAnno.xLen = !annoExt[1]
+		!viewAnno.yLen = !annoExt[2]
+		!viewAnno.dbElement = !annoSlab
+		!viewAnno.xPos			= !slabs[$!ptrslabs].dbref().ddnmx
+		!viewAnno.yPos			= !slabs[$!ptrslabs].dbref().ddnmy
+		!viewAnno.xOff			=	0
+		!viewAnno.yOff			=	0
+		!pipeSlabs.append(!slabs[$!ptrslabs].dbref())
+		!viewAnnoArray.append(!viewAnno)
+	enddo
+
+	
+
+	--【2026-10-31 修正·按你的说明】上面这版是把设备名做成图面标注（错的）；
+	--   正确做法是像 DIMLABELS 那样排到外围，见本方法末尾的 GenerateEquiPlateLabels()。
+	--【2026-10-31 新增·按你的要求】设备名引出标注：单行 "name EL 12.34 m"，
+	--   不再写进 V-NOTES（NoteGenerator 里那两条 TEXTPRIMITIVE 已注掉），
+	--   而是和管线号/支架/仪表标注一起参与贪心避让。
+	-- !list = !limitDbelementGet.GetDrawListElement('EQUI')			$*获取设备
+	-- !labelName = !drawingName + '/EQUILABELS/EQUI'
+	-- !layerName = !viewName + '/EQUI_Labs'
+	-- !labelType = !labelName.dbref()
+	-- !this.LayerGenerate(!layerName)
+	-- !!fmsys.SETPROGRESSTEXT('Generating equipment labels ...')
+	-- do !i indices !list
+	-- !equi = !list[$!i]
+	-- !p = !equi.pos.wrt(world)
+		--【2026-10-31 修正】括号表达式不能直接挂方法调用（E-12）：先赋给变量再 .string()
+	-- !elM = !p.up / 1000
+	-- !elText = !elM.string('D2')
+	-- if(!elText.match(|mm|) gt 0)then
+	-- !elText = !elText.before('mm')
+	-- endif
+		--【2026-10-31 修正】SafeText 只在 NoteGenerator 里，本类没有；这里直接拼字符串，名字为空时用空串
+	-- !nm = !equi.name
+	-- if(!nm.unset())then
+	-- !nm = ''
+	-- endif
+	-- !message = !nm + ' EL ' + !elText + ' m'
+	-- !this.GenerateNote(!equi,!message,!labelType)
+	-- enddo
+	-- !!fmsys.SETPROGRESS(0)
+	-- var !slabs coll all slab for $!layerName
+	-- do !ptrslabs indices !slabs
+	-- !annoSlab = !slabs[$!ptrslabs].dbref()
+	-- !viewAnno = object ViewAnnotation()
+	-- !annoExt = !this.LabelExtent(!annoSlab,2.5)
+	-- !viewAnno.xLen = !annoExt[1]
+	-- !viewAnno.yLen = !annoExt[2]
+	-- !viewAnno.dbElement = !annoSlab
+	-- !viewAnno.xPos = !slabs[$!ptrslabs].dbref().ddnmx
+	-- !viewAnno.yPos = !slabs[$!ptrslabs].dbref().ddnmy
+	-- !viewAnno.xOff = 0
+	-- !viewAnno.yOff = 0
+	-- !equiSlabs.append(!slabs[$!ptrslabs].dbref())
+	-- !viewAnnoArray.append(!viewAnno)
+	-- enddo
+
+	!this.AnnotationOptimization(!viewAnnoArray)
+	--【本次新增·按你的要求】优化排布之后再发 Cpoffset：
+	--   AnnotationOptimization 末尾用 `offset x y` 把每个标注挪到候选方位，
+	--   所以必须等它跑完，读到的 .xypos 才是最终方位。
+	--   三类：管线号(PIPE) / 支架(SUPP) / 仪表(INST)；管口标注 NOZZ 你没提，保持原样不动。
+	!this.ApplyCpoffset(!instSlabs,'INST')
+	!this.ApplyCpoffset(!suppSlabs,'SUPP')
+	!this.ApplyCpoffset(!pipeSlabs,'PIPE')
+
+	--【2026-10-31 修正】设备名改由 DimensionGenerator.GetEquipmentLabels() 并入管道引线标注数组，
+	--   与管道标注同一套定位/排序/样式；本类这套独立排布已停用（代码保留）。
+	-- !this.GenerateEquiPlateLabels()
+	-- !this.ApplyCpoffset(!equiSlabs,'PIPE')	$*设备名已改外围标注，不参与贪心避让
+
+endmethod
+--------------------------------------------------------------------------------------
+define method .GenerateEquiLayout()
+	!view = !this.view
+	!viewAnnoArray = object array()
+	!viewAnno = object ViewAnnotation()
+	--【本次新增·按你的要求】分别记住三类标注的 SLABEL dbref，最后按 xypos 方位发 Cpoffset。
+	--   为什么在这里顺手收集、而不是最后重新 coll：
+	--   AnnotationOptimization 结束时 !!ce 停在某个标注上，那时再用相对图层名去 coll
+	--   会解析到别处；在各自已验证可用的收集循环里存 dbref 最稳。
+	!instSlabs = object array()
+	!suppSlabs = object array()
+	!pipeSlabs = object array()
+	!limitDbelementGet = object LimitDbelementGet()
+	!limitDbelementGet.view = !view
+	!volume = !limitDbelementGet.GetVolume()
+	!drawingName = !view.owner.owner.name
+	!viewName = !view.name
+	--【报错修复】(2,751) Variable !PERCENT does not exist（在 Generate 第 35 行）
+	--   原因：第 35 行在**循环之后**又用了一次 !percent，而 !percent 只在循环体里赋值。
+	--   当仪表清单为空（图纸里没有 INST 元件）时循环体一次都不执行 →
+	--   !percent 从未被赋值 → 传参时报"变量不存在"。
+	--   修法：开头先给初值 0。空清单时第 35 行就等于 SETPROGRESS(0)
+	--   （与后面四个块结尾的写法一致），非空时仍是"跑完显示 100"的原意。
+	--   【为什么不用 handle】这是本方法自身的逻辑漏洞，不是外部不可控状况：
+	--   加 handle 只是把错误吞掉，还会连带掩盖这一段里真正的故障
+	--   （取数失败/图层建失败/生成注释失败）而不报错。判断依据见 PORTING_LOG 23.17。
+	!percent = 0
+	
+
+	--【本段=管口标注 NOZZ】按你的要求：设备布置图里保留管口标注
+	--【本次修改·按你的要求】管口(NOZZ)标注在设备布置图里**保留**（原先被 if(!equiMode.not()) 跳过）
+	--【23.154 修复·同上】这里同样误用了设备取数口径 → 改回取 NOZZ（母版第 74 行的写法）。
+	!list = !limitDbelementGet.GetDrawListElement('NOZZ')				$*获取管口
+	!labelName = !drawingName + '/NOZZLES/NOZZ'
+	!layerName = !viewName + '/NOZZ_Labs'
+	!labelType = !labelName.dbref()
+	!!fmsys.SETPROGRESSTEXT('Generating nozzle labels ...')
+	!this.LayerGenerate(!layerName)
+	do !i indices !list
+		!percent = !i / !list.size() * 100
+		!!fmsys.SETPROGRESS(!percent)
+		!nozzName = !list[$!i].name
+		!equiName = name of equi of $!nozzName
+		!message = !nozzName.replace(!equiName,'').replace('-','').replace('/','').replace('.','')
+		!this.GenerateNote(!list[$!i],!message,!labelType)
+	enddo
+	!!fmsys.SETPROGRESS(0)
+	var !slabs coll all slab for $!layerName
+	do !ptrslabs indices !slabs
+		--【23.164 修正·重叠根因】原来整个方法只在开头建**一个** ViewAnnotation，
+		--   这 7 个收集循环都往同一个对象里写、再 append 同一个引用 ——
+		--   PML 数组存 UDO 是引用语义（23.155 在 CostElement 上吃过同一个亏），
+		--   于是 viewAnnoArray 里 N 个元素指向同一个对象、只剩最后一串坐标，
+		--   贪心等于在跟一个幻影比较，最后也只有**一条**标注被 offset 挪动过 —— 重叠就是这么来的。
+		--   现在每个标注各建一个，顺带记下它自己的文字外框 (xLen/yLen)。
+		!annoSlab = !slabs[$!ptrslabs].dbref()
+		!viewAnno = object ViewAnnotation()
+		!annoExt = !this.LabelExtent(!annoSlab,2.5)
+		!viewAnno.xLen = !annoExt[1]
+		!viewAnno.yLen = !annoExt[2]
+		!viewAnno.dbElement = !annoSlab
+		!viewAnno.xPos			= !slabs[$!ptrslabs].dbref().ddnmx
+		!viewAnno.yPos			= !slabs[$!ptrslabs].dbref().ddnmy
+		!viewAnno.xOff			=	0
+		!viewAnno.yOff			=	0
+		!viewAnnoArray.append(!viewAnno)
+	enddo
+	
+	--【本段=设备名标注 EQUI】文字取 FLNN、字号 5mm、进贪心避让
+	--【本次新增·按你的要求】EquiLayout：设备名标注（进同一个贪心避让数组）
+	--【本次修改·按你的要求】改用唯一口径：LimitDbelementGet.GetEquiInView()
+	!list = !limitDbelementGet.GetEquiInView()
+	!labelName = !drawingName + '/EQUILABELS/EQUI'
+	!labelType = !labelName.dbref()
+	!layerName = !viewName + '/EQUI_Labs'
+	!this.LayerGenerate(!layerName)
+	!!fmsys.SETPROGRESSTEXT('Generating equipment labels ...')
+	!percent = 0
+	do !i indices !list
+		!percent = !i / !list.size() * 100
+		!!fmsys.SETPROGRESS(!percent)
+		-- 标注文字用 **FLNN**（按你的要求：.name 会带 / 号）
+		!this.GenerateNote(!list[$!i],!list[$!i].flnn,!labelType)
+	enddo
+	!!fmsys.SETPROGRESS(0)
+	!equiSlabs = object array()
+	var !slabs coll all slab for $!layerName
+	do !ptrslabs indices !slabs
+		--【23.164 修正·重叠根因】原来整个方法只在开头建**一个** ViewAnnotation，
+		--   这 7 个收集循环都往同一个对象里写、再 append 同一个引用 ——
+		--   PML 数组存 UDO 是引用语义（23.155 在 CostElement 上吃过同一个亏），
+		--   于是 viewAnnoArray 里 N 个元素指向同一个对象、只剩最后一串坐标，
+		--   贪心等于在跟一个幻影比较，最后也只有**一条**标注被 offset 挪动过 —— 重叠就是这么来的。
+		--   现在每个标注各建一个，顺带记下它自己的文字外框 (xLen/yLen)。
+		!annoSlab = !slabs[$!ptrslabs].dbref()
+		!viewAnno = object ViewAnnotation()
+		!annoExt = !this.LabelExtent(!annoSlab,5)
+		!viewAnno.xLen = !annoExt[1]
+		!viewAnno.yLen = !annoExt[2]
+		!viewAnno.dbElement = !annoSlab
+		!viewAnno.xPos			= !slabs[$!ptrslabs].dbref().ddnmx
+		!viewAnno.yPos			= !slabs[$!ptrslabs].dbref().ddnmy
+		!viewAnno.xOff			=	0
+		!viewAnno.yOff			=	0
+		!equiSlabs.append(!slabs[$!ptrslabs].dbref())
+		!viewAnnoArray.append(!viewAnno)
+	enddo
+
+	!this.AnnotationOptimization(!viewAnnoArray)
+	--【本次新增·按你的要求】优化排布之后再发 Cpoffset：
+	--   AnnotationOptimization 末尾用 `offset x y` 把每个标注挪到候选方位，
+	--   所以必须等它跑完，读到的 .xypos 才是最终方位。
+	--   三类：管线号(PIPE) / 支架(SUPP) / 仪表(INST)；管口标注 NOZZ 你没提，保持原样不动。
+	!this.ApplyCpoffset(!instSlabs,'INST')
+	!this.ApplyCpoffset(!suppSlabs,'SUPP')
+	!this.ApplyCpoffset(!pipeSlabs,'PIPE')
+
+endmethod
+--------------------------------------------------------------------------------------
+-- 仪表点位图（Layout = InstLayout）：只出仪表标注，样式与管道平面布置图**同一段代码**
+define method .GenerateInstLayout()
+	!view = !this.view
+	!viewAnnoArray = object array()
+	!viewAnno = object ViewAnnotation()
+	--【本次新增·按你的要求】分别记住三类标注的 SLABEL dbref，最后按 xypos 方位发 Cpoffset。
+	--   为什么在这里顺手收集、而不是最后重新 coll：
+	--   AnnotationOptimization 结束时 !!ce 停在某个标注上，那时再用相对图层名去 coll
+	--   会解析到别处；在各自已验证可用的收集循环里存 dbref 最稳。
+	!instSlabs = object array()
+	!suppSlabs = object array()
+	!pipeSlabs = object array()
+	!limitDbelementGet = object LimitDbelementGet()
+	!limitDbelementGet.view = !view
+	!volume = !limitDbelementGet.GetVolume()
+	!drawingName = !view.owner.owner.name
+	!viewName = !view.name
+	--【报错修复】(2,751) Variable !PERCENT does not exist（在 Generate 第 35 行）
+	--   原因：第 35 行在**循环之后**又用了一次 !percent，而 !percent 只在循环体里赋值。
+	--   当仪表清单为空（图纸里没有 INST 元件）时循环体一次都不执行 →
+	--   !percent 从未被赋值 → 传参时报"变量不存在"。
+	--   修法：开头先给初值 0。空清单时第 35 行就等于 SETPROGRESS(0)
+	--   （与后面四个块结尾的写法一致），非空时仍是"跑完显示 100"的原意。
+	--   【为什么不用 handle】这是本方法自身的逻辑漏洞，不是外部不可控状况：
+	--   加 handle 只是把错误吞掉，还会连带掩盖这一段里真正的故障
+	--   （取数失败/图层建失败/生成注释失败）而不报错。判断依据见 PORTING_LOG 23.17。
+	!percent = 0
+
+	--【本段=仪表标注 INST】原 Generate 里的这一段，逻辑原样未改
+	--【本次修改·按你的要求】改用唯一口径 + 兜底：DrawList 里没有仪表时，退化为视图范围内全部 INST
+	!list = !limitDbelementGet.GetInstInView()
+	!labelName = !drawingName + '/INSTLABELS/INST'
+	!labelType = !labelName.dbref()
+	!layerName = !viewName + '/INST_Labs'
+	!this.LayerGenerate(!layerName)
+	--【本次修改】进度栏文字由中文改成英文（共 5 处：INST/SUPP/NOZZ/PIPE/优化排布）
+	--   原因：`!!fmsys.SETPROGRESSTEXT()` 的文本有时显示成乱码（进度栏那个控件对
+	--   非 ASCII 的处理不稳定），中文在不同机器/会话上时好时坏，英文则一直正常。
+	--   这 5 处是全插件**唯一**会显示出来的中文字符串（其余中文都在注释里，不参与显示，
+	--   已用脚本核查过）。原来的中文文案与对应关系：
+	--     正在生成图面设备标注... → Generating instrument labels ...
+	--     正在生成图面支架标注... → Generating support labels ...
+	--     正在生成图面管口标注... → Generating nozzle labels ...
+	--     正在生成图面管道标注... → Generating pipe labels ...
+	--     正在优化图面标注布置... → Optimizing label layout ...
+	!!fmsys.SETPROGRESSTEXT('Generating instrument labels ...')
+	do !i indices !list
+		!percent = !i / !list.size() * 100
+		!!fmsys.SETPROGRESS(!percent)
+		!name = !list[$!i].flnn
+		!nameList = !name.split('-')
+		do !j indices !nameList
+			if(!j eq 1)then
+				!message = !nameList[$!j]
+			else
+				--【本次修改·按你的要求】#/ 后面若没内容，补一个空格（导出/居中时不会报错）
+				!part = !nameList[$!j]
+				if(!part.Empty())then
+					!part = ' '
+				endif
+				!message = !message + ' #/' + !part
+			endif
+		enddo
+		!this.GenerateNote(!list[$!i],!message,!labelType)
+	enddo
+	!!fmsys.SETPROGRESS(!percent)
+	var !slabs coll all slab for $!layerName
+	do !ptrslabs indices !slabs
+		!instSlabs.append(!slabs[$!ptrslabs].dbref())
+		--【23.164 修正·重叠根因】原来整个方法只在开头建**一个** ViewAnnotation，
+		--   这 7 个收集循环都往同一个对象里写、再 append 同一个引用 ——
+		--   PML 数组存 UDO 是引用语义（23.155 在 CostElement 上吃过同一个亏），
+		--   于是 viewAnnoArray 里 N 个元素指向同一个对象、只剩最后一串坐标，
+		--   贪心等于在跟一个幻影比较，最后也只有**一条**标注被 offset 挪动过 —— 重叠就是这么来的。
+		--   现在每个标注各建一个，顺带记下它自己的文字外框 (xLen/yLen)。
+		!annoSlab = !slabs[$!ptrslabs].dbref()
+		!viewAnno = object ViewAnnotation()
+		!annoExt = !this.LabelExtent(!annoSlab,2.5)
+		!viewAnno.xLen = !annoExt[1]
+		!viewAnno.yLen = !annoExt[2]
+		!viewAnno.dbElement = !annoSlab
+		!viewAnno.xPos			= !slabs[$!ptrslabs].dbref().ddnmx
+		!viewAnno.yPos			= !slabs[$!ptrslabs].dbref().ddnmy
+		!viewAnno.xOff			=	0
+		!viewAnno.yOff			=	0
+		!viewAnnoArray.append(!viewAnno)
+	enddo
+	
+
+	!this.AnnotationOptimization(!viewAnnoArray)
+	--【本次新增·按你的要求】优化排布之后再发 Cpoffset：
+	--   AnnotationOptimization 末尾用 `offset x y` 把每个标注挪到候选方位，
+	--   所以必须等它跑完，读到的 .xypos 才是最终方位。
+	--   三类：管线号(PIPE) / 支架(SUPP) / 仪表(INST)；管口标注 NOZZ 你没提，保持原样不动。
+	!this.ApplyCpoffset(!instSlabs,'INST')
+	!this.ApplyCpoffset(!suppSlabs,'SUPP')
+	!this.ApplyCpoffset(!pipeSlabs,'PIPE')
+
+endmethod
+--------------------------------------------------------------------------------------
+--------------------------------------------------------------------------------------
+--【23.155 新增·按你的要求】贪心避让的**参数默认值集中在这里**（想调数值只改这一段；改完重载即可）。
+--   只在"未设置"时填 → 外部（表单/宏）先给成员赋值也能覆盖这里的默认值。
+--   当前值（23.155 调整后）：圈数 4、递进 9mm、重叠 121(11mm)、遮挡 64(8mm)、
+--                            出界 +300、交叉 +150、近邻 4000(≈63mm)
+--   改动前的原值：            圈数 3、递进 7mm、重叠 81(9mm)、 遮挡 25(5mm)、
+--                            出界 +50、 交叉 +100、近邻 3000(≈55mm)
+--   备份与回退：backup\GreedyParams_before_*.txt 与 backup\LabelGenerator.greedy_before_*.pmlobj.bak
+define method .GreedyDefaults()
+	if(!this.greedyTier.unset())then
+		!this.greedyTier = 4
+	endif
+	if(!this.greedyGap.unset())then
+		!this.greedyGap = 9
+	endif
+	if(!this.greedyOverlapR2.unset())then
+		!this.greedyOverlapR2 = 121
+	endif
+	if(!this.greedyOccludeR2.unset())then
+		!this.greedyOccludeR2 = 64
+	endif
+	if(!this.greedyFrameCost.unset())then
+		!this.greedyFrameCost = 300
+	endif
+	if(!this.greedyCrossCost.unset())then
+		!this.greedyCrossCost = 40000
+	endif
+	if(!this.greedyNeighbourR2.unset())then
+		!this.greedyNeighbourR2 = 4000
+	endif
+	if(!this.penOverlap.unset())then
+		!this.penOverlap = 100000
+	endif
+	if(!this.penAnchor.unset())then
+		!this.penAnchor = 50000
+	endif
+	if(!this.penSelfAnchor.unset())then
+		!this.penSelfAnchor = 3000
+	endif
+	if(!this.penCross.unset())then
+		!this.penCross = 120000
+	endif
+	if(!this.penCrossBox.unset())then
+		!this.penCrossBox = 60000
+	endif
+	if(!this.penFrame.unset())then
+		!this.penFrame = 12000
+	endif
+	if(!this.distCost.unset())then
+		!this.distCost = 24
+	endif
+	if(!this.repairPasses.unset())then
+		!this.repairPasses = 5
+	endif
+	if(!this.annealIterations.unset())then
+		!this.annealIterations = 150
+	endif
+	if(!this.annealTemp0.unset())then
+		!this.annealTemp0 = 15000
+	endif
+	if(!this.annealCooling.unset())then
+		!this.annealCooling = 0.98
+	endif
+	if(!this.annealRadius.unset())then
+		!this.annealRadius = 150
+	endif
+	if(!this.penGeometry.unset())then
+		!this.penGeometry = 25000
+	endif
+	if(!this.geomInset.unset())then
+		!this.geomInset = 1.5
+	endif
+	if(!this.geomMaxDetour.unset())then
+		!this.geomMaxDetour = 120
+	endif
+	if(!this.escapeMinPen.unset())then
+		!this.escapeMinPen = 25000
+	endif
+	if(!this.crossFixRadii.unset())then
+		!this.crossFixRadii = object array()
+		!this.crossFixRadii.append(20)
+		!this.crossFixRadii.append(30)
+		!this.crossFixRadii.append(45)
+		!this.crossFixRadii.append(65)
+		!this.crossFixRadii.append(90)
+		!this.crossFixRadii.append(120)
+		!this.crossFixRadii.append(160)
+		!this.crossFixRadii.append(200)
+	endif
+	if(!this.escapeRadii.unset())then
+		!this.escapeRadii = object array()
+		!this.escapeRadii.append(12)
+		!this.escapeRadii.append(18)
+		!this.escapeRadii.append(25)
+		!this.escapeRadii.append(35)
+		!this.escapeRadii.append(50)
+	endif
+	if(!this.greedyMaxNeigh.unset())then
+		!this.greedyMaxNeigh = 8
+	endif
+	if(!this.greedyFastCost.unset())then
+		!this.greedyFastCost = 12000
+	endif
+	if(!this.geomQueries.unset())then
+		!this.geomQueries = 0
+	endif
+	if(!this.obsReady.unset())then
+		!this.obsReady = false
+	endif
+	if(!this.penGeomPipe.unset())then
+		!this.penGeomPipe = 20000
+	endif
+	if(!this.penGeomInst.unset())then
+		!this.penGeomInst = 30000
+	endif
+	if(!this.penGeomValv.unset())then
+		!this.penGeomValv = 30000
+	endif
+	if(!this.penGeomEqui.unset())then
+		!this.penGeomEqui = 6000
+	endif
+	if(!this.equiShrink.unset())then
+		!this.equiShrink = 0.85
+	endif
+	if(!this.boxPadX.unset())then
+		!this.boxPadX = 4
+	endif
+	if(!this.boxPadY.unset())then
+		!this.boxPadY = 3
+	endif
+	if(!this.plateMargin.unset())then
+		!this.plateMargin = 12
+	endif
+	if(!this.plateSpace.unset())then
+		!this.plateSpace = 6
+	endif
+endmethod
+--------------------------------------------------------------------------------------
+--【23.162 新增·性能】进入避让计算前的唯一准备入口：
+--   ① 填贪心参数默认值（原 .GreedyDefaults() 的职责，保持不变）；
+--   ② 把图幅矩形算进成员，供最内层的 .CostCalculation() 直接读。
+--   ⚠ 顺序要求：.UpdateSlabPosition() / .AnnotationOptimization() 都必须先走这里，
+--     之后 .CostCalculation() 不再自己读库（它是最内层，任何多余开销都乘上百万次）。
+--【23.163 修正·别再省这一步】原来这里有个"只在第一次算"的守卫：
+--     !cached = !this.frameCX / if(!cached.unset().not())then return endif
+--   实测在 PDMS 上会报 (2,758) Expression result not of expected type (BOOLEAN/REAL)：
+--   **把一个"从未赋过值"的 REAL 成员读进局部变量后，.unset() 判断并不可靠**
+--   （局部变量看着有类型、值却是未定义，塞进 if 就报 2,758）。
+--   现在不设守卫、每次调用都算：一次出图约 300 个标注 → 300×4 次属性读，
+--   相比原来"每次候选比较都读"（约 43 万×4）仍是三个数量级的改善，不值得为省这点冒崩溃风险。
+define method .PrepareCostContext()
+	!this.GreedyDefaults()
+	!v = !this.view
+	!pos = !v.xypos
+	!sz = !v.size
+	!this.frameCX = !pos.east
+	!this.frameCY = !pos.north
+	!this.frameHX = !sz[1] / 2
+	!this.frameHY = !sz[2] / 2
+endmethod
+--------------------------------------------------------------------------------------
+--【23.164 新增】估一个标注文字的外框（mm）：宽 = 总字数×字高×0.62，高 = 行数×字高×1.4。
+--   为什么要估：原来代价函数把标注当"点"、只用 11mm 半径判重叠，而设备名（CHEI 5mm、
+--   十几个字符）实际 30~50mm 宽 —— 点判据根本判不出重叠，这就是"两个标注重叠"的直接原因。
+--   · 文字存在 SLABEL 的 atext / atex 属性里（本插件 SetSlabText 两个都写），读不到就返回 0；
+--   · `#/` 是换行符（本项目拼多行文字用的就是它），用"去掉 #/ 后少了几个字"数出换行次数；
+--   · 读不到文字 → 返回 [0,0]，调用方自动退回旧的圆形半径判据（等价于改造前）。
+define method .LabelExtent(!label is dbref,!chei is real) is array
+	!r = object array()
+	!r[1] = 0
+	!r[2] = 0
+	!t = ''
+	!t = !label.atext
+	handle any
+		!t = ''
+	endhandle
+	if(!t.unset())then
+		!t = ''
+	endif
+	if(!t eq '')then
+		!t2 = ''
+		!t2 = !label.atex
+		handle any
+			!t2 = ''
+		endhandle
+		if(!t2.unset())then
+			!t2 = ''
+		endif
+		!t = !t2
+	endif
+	if(!t eq '')then
+		return !r
+	endif
+	--【2026-10-31·按你的要求】框尺寸按**标注对象**取：设备名是 CHEI 5mm，
+	--   其它类别 2.5mm；这里读标注自身的 .chei，与传入值取大。
+	!h = !chei
+	!ch = 0
+	!ch = !label.chei
+	handle any
+		!ch = 0
+	endhandle
+	if(!ch gt !h)then
+		!h = !ch
+	endif
+	!this.GreedyDefaults()
+	!padX = !this.boxPadX
+	!padY = !this.boxPadY
+	!total = !t.length()
+	!noSep = !t.replace('#/','').length()
+	!nBreak = (!total - !noSep) / 2
+	!r[1] = !total * !h * 0.62 + !padX
+	!r[2] = (!nBreak + 1) * !h * 1.4 + !padY
+	return !r
+endmethod
+--------------------------------------------------------------------------------------
+define method .AnnotationOptimization(!list is array)
+	!this.PrepareCostContext()
+	!view = !this.view
+	--【2026-10-31·按你的要求】best-fit first：框大的先放（越难安置的越先占位），
+	--   用框面积降序就地冒泡，标注通常 200~400 条，代价可接受。
+	--【2026-10-31·方案A】先建图面几何障碍表（管线中线 + 设备轮廓）
+	!this.BuildObstacles()
+	!this.SortByDifficulty(!list)
+	!result = object array()
+	!!fmsys.SETPROGRESSTEXT('Optimizing label layout ...')
+	!total = !list.size()
+	!lastFrac = 0
+	do !i indices !list
+		--【23.162 性能·进度条节流】原来每个标注都 SETPROGRESS 一次（界面往返上百次），
+		--   现在只在跨过 5% 时更新，最多 21 次；!list.size() 也提到循环外。
+		!frac = !i / !total
+		if(!frac ge !lastFrac)then
+			!lastFrac = !lastFrac + 0.05
+			!!fmsys.SETPROGRESS(!frac * 100)
+		endif
+		--【23.164】把当前标注的文字外框存进成员，供代价函数判重叠
+		!this.curXLen = !list[$!i].xLen
+		!this.curYLen = !list[$!i].yLen
+		!fellBack = false
+		!off = object array()
+		if(!i eq 1)then
+			-- 第一个标注不做避让（老逻辑固定偏 5/5）
+			!off[1] = 5
+			!off[2] = 5
+		else
+			--【23.160 修正·handle 后置绑定】这次调用原来写在 else 分支里、
+			--   handle 挂在 endif 后面 —— 按 PML 语义兜不住调用本身。
+			--   现在 handle 紧跟这次调用。
+			!off = !this.UpdateSlabPosition(!result,!list[$!i].xPos,!list[$!i].yPos)
+		handle any
+			--【本次修正】分发失败（内存里的 labelgenerator 模块旧 / 只编译了一半，典型报错
+			--   (2,779) Method <LABELGENERATOR>.UPDATESLABPOSITION(<ARRAY>,<VIEWANNOTATION>) not found）
+			--   → 该标注不参与排布优化，按原始偏移收进结果；标注照常生成，不再中断 Generate。
+			--   根治办法是重载对象：$m %PMLLIB%\LayoutTool\mac\reload_layouttool.mac
+			!fellBack = true
+		endhandle
+		endif
+		--【PML 语义提醒】if(!x) = "x 为真"，不是取反：
+		--   !fellBack 为真 = 这一次降级了 → 打印提示，偏移量保持原样；
+		--   取反要写 .not()（下面第二个 if）。这里写反过一次，见 PORTING_LOG 23.162。
+		if(!fellBack)then
+			$p UpdateSlabPosition not found in the loaded module - layout optimization skipped for this label (reload the object).
+		endif
+		if(!fellBack.not())then
+			!list[$!i].xoff = !off[1]
+			!list[$!i].yoff = !off[2]
+		endif
+		!result.append(!list[$!i])
+	enddo
+	!!fmsys.SETPROGRESS(0)
+	--【2026-10-31·按你的要求】冲突消除后处理：贪心是单趟的，放完不再回头；
+	--   这里对每一对重叠的框，把后放的那个挪到最近的可行候选（不动已无冲突的）。
+	--【2026-10-31 调整顺序】退火放在冲突消除**之前**：
+	--   先让退火跳出贪心的局部最优（贪心一路向下，会把标注塞到一堆），
+	--   再用确定性的冲突消除把尾巴收干净。
+	!this.StatLog('after_greedy',!result)
+	--【2026-11-01·按你的要求】贪心单轮会留重叠，这里用**轻量版**消重叠（只处理真重叠的标注，2 轮就停）
+	do !ofx from 1 to 2
+		!ofxMoved = !this.OverlapFixPass(!result)
+		if(!ofxMoved lt 1)then
+			break
+		endif
+	enddo
+	--【2026-11-01·按你的反馈】**模拟退火暂停**：出图反而比只有贪心时更杂乱。
+	--   方法体保留，恢复就把下面两行取消注释：
+	--   !this.AnnealLabels(!result)
+	--   !this.StatLog('after_anneal',!result)
+	--【2026-11-01·按你的要求】**RepairPass 全部取消**（太卡），只保留模拟退火。
+	--   方法体保留，以后要用取消注释即可。
+	--【2026-11-01】堆叠清完再清交叉（交叉需要远移，RepairPass 只在附近找位）
+	!this.StatLog('after_repair',!result)
+	--【2026-11-01】堆叠清完后，把“离得远但附近有空位”的标注往锚点收回来
+	--【2026-11-01·按你的要求】ShrinkPass 也停用，只留最基础的模拟退火
+	--【2026-11-01·按你的要求】**交叉判断全部停用**：
+	--   · CostCalculation 里的 ③（引线相交）与 ④（引线穿框）已注释掉
+	--   · 流水线不再调 CrossFixPass（方法保留，以后要用直接取消注释）
+	--   · 这样模拟退火不再计算交叉，速度也不再被它拖累
+	--【2026-10-31·按你的要求】模拟退火：在贪心+冲突消除之后，
+	--   对反复涉事的标注做随机重放，阈值接受、温度逐步下降。
+	
+	do !ptrResult indices !result
+		!db = !result[$!ptrResult].dbElement
+		!xoff = !result[$!ptrResult].xoff
+		!yoff = !result[$!ptrResult].yoff
+		$!db
+		offset x $!xoff y $!yoff
+	enddo
+endmethod
+--------------------------------------------------------------------------------------
+--【报错修复】(2,779) Method <LABELGENERATOR>.UPDATESLABPOSITION(<ARRAY>,<VIEWANNOTATION>) not found
+--   根因：本方法原来是**唯一**一个把"对象类名"当返回类型写的方法：
+--         `define method .UpdateSlabPosition(...) is ViewAnnotation`
+--   本插件其余 100+ 个方法的返回类型一律是内建类型（real/array/string/boolean/volume...），
+--   只有这一处用了对象类名 ViewAnnotation。PML 编译到这一行会失败 → 该方法（以及其后定义的方法）
+--   没有进内存模块 → 运行时调用就是 (2,779) Method not found，且 `handle` 也抓不住这类错误。
+--   【为什么以前没暴露】23.41/23.42 那几轮标签被等级过滤器全部跳过，!viewAnnoArray 是空的，
+--   本优化循环一次都没执行；标签恢复之后这个潜伏问题才第一次被触发。
+--   修法：去掉 `is ViewAnnotation`（返回类型属于元信息，参数类型仍是 ViewAnnotation 不变，
+--   分发按"方法名+参数个数+参数类型"匹配，与返回类型无关，故行为不变）。
+define method .UpdateSlabPosition(!list is array,!xPos is real,!yPos is real) is array
+	!this.PrepareCostContext()				$* 单独调用时也保证参数与图幅都有值
+	--【报错修复】(2,779) 方法签名里不能出现本插件自定义对象类名（ViewAnnotation / CostElement），
+	--   否则该方法编译不进内存模块，调用时 Method not found（且 handle 抓不住这类错误）。
+	--   本方法原为 `(!list is array,!viewAnno is ViewAnnotation)`，现改为数值传入：
+	--     !xPos / !yPos = 当前标注的原始位置；返回二元数组 [xoff, yoff]（选中的偏移量）。
+	--   逻辑与原来逐行等价，只是把"读对象成员"换成"读数值参数"。
+	!view = !this.view
+	--这个用来更新标签的新坐标
+	!cost = !this.CostBuild()
+	--【23.164】近邻半径加上"当前标注自身的宽度"：
+	--   原来固定 63mm 判"要不要拿来比较"，而设备名可能 40mm 宽 —— 两串长文字的中心
+	--   只要超过 63mm 就完全不比较，压在一起也不知道。宽标注自动扩大搜索范围。
+	!neighR = power(!this.greedyNeighbourR2,0.5) + !this.curXLen
+	!neighR2 = !neighR * !neighR
+	--【2026-10-31·性能】先挑出最近的 greedyMaxNeigh 个邻居，
+	--   只对它们跑 48 个候选 × CostCalculation（调用开销占主要成本）。
+	!neighIdx = object array()
+	!neighDist = object array()
+	!maxN = !this.greedyMaxNeigh
+	do !ptrList indices !list
+		!dist = power(!list[$!ptrList].xPos - !xPos,2) + power(!list[$!ptrList].yPos - !yPos,2)
+		if(!dist LT !neighR2)then
+			!pos2 = !neighIdx.size() + 1
+			do !k from 1 to !pos2
+				if(!k gt !neighIdx.size())then
+					break
+				endif
+				if(!dist lt !neighDist[$!k])then
+					!pos2 = !k
+					break
+				endif
+			enddo
+			!neighIdx.insert(!pos2,!ptrList)
+			!neighDist.insert(!pos2,!dist)
+		endif
+	enddo
+	--【2026-10-31】只取排序后的前 maxN 个（不用 delete，PML 数组没有靠谱的按下标删）
+	!nn = !neighIdx.size()
+	if(!nn gt !maxN)then
+		!nn = !maxN
+	endif
+	--【2026-10-31·性能】候选分两档：先只算内圈 12 个；代价够好就不算外圈。
+	!computed = 12
+	do !pass from 1 to 2
+	if(!pass eq 1)then
+		!cFrom = 1
+		!cTo = 12
+	else
+		!cFrom = 13
+		!cTo = 48
+		!computed = 48
+	endif
+	do !ptrNeigh from 1 to !nn
+		!ptrList = !neighIdx[$!ptrNeigh]
+		!dist = power(!list[$!ptrList].xPos - !xPos,2) + power(!list[$!ptrList].yPos - !yPos,2)
+		if(!dist LT !neighR2)then		$*只有在一定范围内的才进行比较（半径平方，mm²）
+			--【23.164】把"已放置标注"的文字外框交给代价函数（用成员传，不动方法签名）
+			!this.exXLen = !list[$!ptrList].xLen
+			!this.exYLen = !list[$!ptrList].yLen
+			--【2026-10-31·性能】先用纯算术判相交：相交的候选直接计重罚，
+			--   **不再调 CostCalculation**（单次调用约 0.7ms，密集区域大多数候选都是相交）。
+			!oX = !list[$!ptrList].xPos + !list[$!ptrList].xOff
+			!oY = !list[$!ptrList].yPos + !list[$!ptrList].yOff
+			!hwSum = (!this.curXLen + !list[$!ptrList].xLen) / 2
+			!hhSum = (!this.curYLen + !list[$!ptrList].yLen) / 2
+			do !ptrCost from !cFrom to !cTo
+				!dx = !xPos + !cost[$!ptrCost].x - !oX
+				if(!dx lt 0)then
+					!dx = 0 - !dx
+				endif
+				!dy = !yPos + !cost[$!ptrCost].y - !oY
+				if(!dy lt 0)then
+					!dy = 0 - !dy
+				endif
+				!isOv = false
+				if(!dx lt !hwSum)then
+					if(!dy lt !hhSum)then
+						!isOv = true
+					endif
+				endif
+				if(!isOv)then
+					-- 相交：直接重罚 + 一个便宜的距离项用于打平
+					!cost[$!ptrCost].cost = !cost[$!ptrCost].cost + !this.penOverlap + (!dx + !dy) * !this.distCost * 0.7
+				else
+					!cost[$!ptrCost].cost = !cost[$!ptrCost].cost + !this.CostCalculation(!list[$!ptrList].xPos,!list[$!ptrList].xOff,!list[$!ptrList].yPos,!list[$!ptrList].yOff,!xPos,!yPos,!cost[$!ptrCost].x,!cost[$!ptrCost].y,!cost[$!ptrCost].cost)
+				endif
+			enddo
+		else
+			skip
+		endif
+	enddo
+	--【2026-10-31·性能】内圈最优代价已经够好就不计外圈
+	if(!pass eq 1)then
+		!best1 = 999999999
+		do !pc from 1 to 12
+			if(!cost[$!pc].cost lt !best1)then
+				!best1 = !cost[$!pc].cost
+			endif
+		enddo
+		if(!best1 lt !this.greedyFastCost)then
+			break
+		endif
+	endif
+	enddo
+	
+	do !ptrCost from 1 to !computed	$*排序找到最小的
+		if(!ptrCost eq 1)then
+			!value = !cost[$!ptrCost].cost
+			!pointer = !ptrCost
+		else
+			if(!value gt !cost[$!ptrCost].cost)then
+				!value = !cost[$!ptrCost].cost
+				!pointer = !ptrCost
+			endif
+		endif
+	enddo
+	--【2026-10-31·方案A】几何避让：先看最优候选，只有它压到图面几何时，
+	--   才按代价从低到高依次尝试次优（最多 6 个）。
+	--   为什么不把几何惩罚加进每个候选：单次查询 2.7ms，48 候选 × 300 标注 = 39s。
+	!nx0 = !xPos + !cost[$!pointer].x
+	!ny0 = !yPos + !cost[$!pointer].y
+	--【2026-10-31·按你的反馈】判交用**缩进**后的框（允许轻微贴边），不再一贴就走
+	!ghw = !this.curXLen / 2 - !this.geomInset
+	!ghh = !this.curYLen / 2 - !this.geomInset
+	if(!ghw lt 1)then
+		!ghw = 1
+	endif
+	if(!ghh lt 1)then
+		!ghh = 1
+	endif
+	!gh0 = !this.BoxHitPen(!nx0,!ny0,!ghw,!ghh)
+	if(!gh0 gt 0)then
+		!tried = object array()
+		do !ti indices !cost
+			!tried.append(0)
+		enddo
+		!tried[$!pointer] = 1
+		do !try from 1 to 3
+			!best = 0
+			!bc = 0
+			do !pc indices !cost
+				if(!tried[$!pc] eq 0)then
+					if(!best eq 0 or !cost[$!pc].cost lt !bc)then
+						!best = !pc
+						!bc = !cost[$!pc].cost
+					endif
+				endif
+			enddo
+			if(!best gt 0)then
+				!bx = !xPos + !cost[$!best].x
+				!by = !yPos + !cost[$!best].y
+				!gh2 = !this.BoxHitPen(!bx,!by,!this.curXLen / 2,!this.curYLen / 2)
+				if(!gh2 eq 0)then
+					--【2026-10-31·按你的反馈】躲几何也不能跑太远：
+					--   比最优多付的代价超过 geomMaxDetour 就不换了（宁可压一点也不飞出去）
+					!delta = !cost[$!best].cost - !cost[$!pointer].cost
+					if(!delta le !this.geomMaxDetour)then
+						!pointer = !best
+						break
+					endif
+				endif
+				!tried[$!best] = 1
+			endif
+		enddo
+	endif
+	--【2026-10-31·按你的要求】出口搜索：如果轮完次优仍然压在设备里（大瓶体就是这种情况），
+	--   就按 escapeRadii 往外找第一个“图框内 + 不压几何”的位置。
+	!ghwE = !this.curXLen / 2 - !this.geomInset
+	!ghhE = !this.curYLen / 2 - !this.geomInset
+	if(!ghwE lt 1)then
+		!ghwE = 1
+	endif
+	if(!ghhE lt 1)then
+		!ghhE = 1
+	endif
+	!stillHit = !this.BoxHitPen(!xPos + !cost[$!pointer].x,!yPos + !cost[$!pointer].y,!ghwE,!ghhE)
+	--【2026-10-31·按你的要求】只有挡住**高优先级**物件（仪表/阀门/管件，罚金 30000）才值得飞出去；
+	--   设备(6000)/管线(20000) 不如它们重要，宁可贴着也别拉长引线。
+	if(!stillHit ge !this.escapeMinPen)then
+		!esc = !this.FindEscape(!xPos,!yPos,!ghwE,!ghhE)
+		if(!esc.size() gt 1)then
+			!cost[$!pointer].x = !esc[1]
+			!cost[$!pointer].y = !esc[2]
+		endif
+	endif
+	!res = object array()
+	!res[1] = !cost[$!pointer].x
+	!res[2] = !cost[$!pointer].y
+	return !res
+endmethod
+--------------------------------------------------------------------------------------
+define method .CostCalculation(!exPos is real,!exOff is real,!eyPos is real,!eyOff is real,!cxPos is real,!cyPos is real,!candX is real,!candY is real,!candCost is real) is real
+	--【2026-10-31·按你的要求】重做代价函数：四类冲突分别给重罚，
+	--   罚分量级差开三个数量级，保证“宁可远也不重叠”；同时加“离锚点越远越贵”。
+	--   框尺寸用 curXLen/curYLen/exXLen/exYLen（由 LabelExtent 按各自标注对象估）。
+	--   本方法是最内层（百万次级），不读库、不建对象。
+	!xExist = !exPos + !exOff
+	!yExist = !eyPos + !eyOff
+	!xCalculate = !cxPos + !candX
+	!yCalculate = !cyPos + !candY
+	!costValue = !candCost
+
+	!cHW = !this.curXLen / 2
+	!cHH = !this.curYLen / 2
+	!oHW = !this.exXLen / 2
+	!oHH = !this.exYLen / 2
+	if(!cHW lt 1)then
+		!cHW = 1
+	endif
+	if(!cHH lt 1)then
+		!cHH = 1
+	endif
+	if(!oHW lt 1)then
+		!oHW = 1
+	endif
+	if(!oHH lt 1)then
+		!oHH = 1
+	endif
+
+	-- ① 两个标注框重叠：重罚（几乎不允许）
+	!dx = abs(!xCalculate - !xExist)
+	!dy = abs(!yCalculate - !yExist)
+	if(!dx lt (!cHW + !oHW))then
+		if(!dy lt (!cHH + !oHH))then
+			!costValue = !costValue + !this.penOverlap
+		endif
+	endif
+
+	-- ② 框盖住对方标注的起始点：重罚
+	!dxa = abs(!xCalculate - !exPos)
+	!dya = abs(!yCalculate - !eyPos)
+	if(!dxa lt !cHW)then
+		if(!dya lt !cHH)then
+			!costValue = !costValue + !this.penAnchor
+		endif
+	endif
+
+	-- ②b 框盖住自己的起始点：轻罚（引线没了，不好对应）
+	!dxs = abs(!xCalculate - !cxPos)
+	!dys = abs(!yCalculate - !cyPos)
+	if(!dxs lt !cHW)then
+		if(!dys lt !cHH)then
+			!costValue = !costValue + !this.penSelfAnchor
+		endif
+	endif
+
+	-- ③ 引线与引线相交：重罚
+-- 	!px1 = !exPos
+-- 	!py1 = !eyPos
+-- 	!px2 = !xExist
+-- 	!py2 = !yExist
+-- 	!qx1 = !cxPos
+-- 	!qy1 = !cyPos
+-- 	!qx2 = !xCalculate
+-- 	!qy2 = !yCalculate
+-- 	!d1 = (!px2 - !px1) * (!qy1 - !py1) - (!py2 - !py1) * (!qx1 - !px1)
+-- 	!d2 = (!px2 - !px1) * (!qy2 - !py1) - (!py2 - !py1) * (!qx2 - !px1)
+-- 	!d3 = (!qx2 - !qx1) * (!py1 - !qy1) - (!qy2 - !qy1) * (!px1 - !qx1)
+-- 	!d4 = (!qx2 - !qx1) * (!py2 - !qy1) - (!qy2 - !qy1) * (!px2 - !qx1)
+-- 	if(!d1 * !d2 lt 0 and !d3 * !d4 lt 0)then
+-- 		!costValue = !costValue + !this.penCross
+-- 	endif
+
+	-- ④ 引线穿过对方的标注框：中罚
+-- 	!hit = !this.SegRectHit(!cxPos,!cyPos,!xCalculate,!yCalculate,!xExist,!yExist,!oHW,!oHH)
+-- 	if(!hit)then
+-- 		!costValue = !costValue + !this.penCrossBox
+-- 	endif
+
+	-- ⑤ 超出图框：罚
+	!fcx = !this.frameCX
+	!fcy = !this.frameCY
+	!fhx = !this.frameHX
+	!fhy = !this.frameHY
+	if(not(abs(!xCalculate - !fcx) le !fhx and abs(!yCalculate - !fcy) le !fhy))then
+		!costValue = !costValue + !this.penFrame
+	endif
+
+	-- ⑥ 离自己的点越远越贵（避免为了避让跑到很远）
+	!distLen = sqrt(power(!candX,2) + power(!candY,2))
+	!costValue = !costValue + !distLen * !this.distCost
+
+	return !costValue
+endmethod
+--------------------------------------------------------------------------------------
+--【2026-10-31新增】线段与矩形相交判定（引线穿框用）。
+--   先看两个端点是不是落在矩形内，否则逐条边判两线段相交。
+--   参数全是 real（不能用自定义类名，否则 (2,779)）。
+define method .SegRectHit(!x1 is real,!y1 is real,!x2 is real,!y2 is real,!rx is real,!ry is real,!hw is real,!hh is real) is boolean
+	if(abs(!x1 - !rx) lt !hw and abs(!y1 - !ry) lt !hh)then
+		return true
+	endif
+	if(abs(!x2 - !rx) lt !hw and abs(!y2 - !ry) lt !hh)then
+		return true
+	endif
+	!ex1 = !rx - !hw
+	!ey1 = !ry - !hh
+	!ex2 = !rx + !hw
+	!ey2 = !ry + !hh
+	if(!this.SegSegHit(!x1,!y1,!x2,!y2,!ex1,!ey1,!ex2,!ey1))then
+		return true
+	endif
+	if(!this.SegSegHit(!x1,!y1,!x2,!y2,!ex2,!ey1,!ex2,!ey2))then
+		return true
+	endif
+	if(!this.SegSegHit(!x1,!y1,!x2,!y2,!ex2,!ey2,!ex1,!ey2))then
+		return true
+	endif
+	if(!this.SegSegHit(!x1,!y1,!x2,!y2,!ex1,!ey2,!ex1,!ey1))then
+		return true
+	endif
+	return false
+endmethod
+--------------------------------------------------------------------------------------
+--【2026-10-31新增】两线段相交（端点分居对方两侧）。
+define method .SegSegHit(!ax1 is real,!ay1 is real,!ax2 is real,!ay2 is real,!bx1 is real,!by1 is real,!bx2 is real,!by2 is real) is boolean
+	!d1 = (!ax2 - !ax1) * (!by1 - !ay1) - (!ay2 - !ay1) * (!bx1 - !ax1)
+	!d2 = (!ax2 - !ax1) * (!by2 - !ay1) - (!ay2 - !ay1) * (!bx2 - !ax1)
+	!d3 = (!bx2 - !bx1) * (!ay1 - !by1) - (!by2 - !by1) * (!ax1 - !bx1)
+	!d4 = (!bx2 - !bx1) * (!ay2 - !by1) - (!by2 - !by1) * (!ax2 - !bx1)
+	if(!d1 * !d2 lt 0 and !d3 * !d4 lt 0)then
+		return true
+	endif
+	return false
+endmethod
+--------------------------------------------------------------------------------------
+define method .CostBuild() is array
+--这个用来构造的损失计算函数对象
+	!this.GreedyDefaults()				$* 单独调用时也保证参数有值
+	!result = object array()
+	--【23.155 修改·按你的要求】参数改成从成员读（默认 4 圈 / 9mm）；原值 3 圈 / 7mm。
+	!tier = !this.greedyTier
+	!gap = !this.greedyGap
+	--【23.155 修正·关键】原来 `!cost = object CostElement()` 建在两层循环**之外**，
+	--   循环里只改它的成员再 append —— PML 对象是引用语义，多次 append 存的是同一个引用，
+	--   循环结束后所有候选会变成最后一组值（候选退化成一个方向），贪心等于没在挑方位。
+	--   现在改为**每个候选新建一个 CostElement**。
+
+	!directionMatrix = object array()
+	--【23.155 修正】每个方向**新建**一个数组再 append（原来是循环外建一次、改元素再 append，
+	--   同样是引用语义 → 12 个方向会退化成同一组值）。
+	
+	!direction = object array()
+	!direction[1] = 0.5
+	!direction[2] = 0.866025
+	!directionMatrix.append(!direction)
+	!direction = object array()
+	!direction[1] = 0.866025
+	!direction[2] = 0.5
+	!directionMatrix.append(!direction)
+	!direction = object array()
+	!direction[1] = 1.0
+	!direction[2] = 0.0
+	!directionMatrix.append(!direction)
+	!direction = object array()
+	!direction[1] = 0.866025
+	!direction[2] = -0.5
+	!directionMatrix.append(!direction)
+	!direction = object array()
+	!direction[1] = 0.5
+	!direction[2] = -0.866025
+	!directionMatrix.append(!direction)
+	!direction = object array()
+	!direction[1] = 0.0
+	!direction[2] = -1.0
+	!directionMatrix.append(!direction)
+	!direction = object array()
+	!direction[1] = -0.5
+	!direction[2] = -0.866025
+	!directionMatrix.append(!direction)
+	!direction = object array()
+	!direction[1] = -0.866025
+	!direction[2] = -0.5
+	!directionMatrix.append(!direction)
+	!direction = object array()
+	!direction[1] = -1.0
+	!direction[2] = 0.0
+	!directionMatrix.append(!direction)
+	!direction = object array()
+	!direction[1] = -0.866025
+	!direction[2] = 0.5
+	!directionMatrix.append(!direction)
+	!direction = object array()
+	!direction[1] = -0.5
+	!direction[2] = 0.866025
+	!directionMatrix.append(!direction)
+	!direction = object array()
+	!direction[1] = 0.0
+	!direction[2] = 1.0
+	!directionMatrix.append(!direction)
+	
+	do !k from 1 to !tier
+		do !ptrdirectionMatrix indices !directionMatrix
+			!cost = object CostElement()				$*每个候选一个独立对象（引用语义）
+			if(!directionMatrix[$!ptrdirectionMatrix][1] eq 0 or !directionMatrix[$!ptrdirectionMatrix][2] eq 0)then	$*不推荐放到正方向上
+				!cost.cost = (!k - 1) * 10
+			else
+				!cost.cost = (!k - 1) * 5
+			endif
+			!cost.x = !gap * !k  * !directionMatrix[$!ptrdirectionMatrix][1]
+			!cost.y = !gap * !k  * !directionMatrix[$!ptrdirectionMatrix][2]
+			!result.append(!cost)
+			
+		enddo
+	enddo
+	return !result
+endmethod
+
+--------------------------------------------------------------------------------------
+define method .GenerateNote(!element is dbref,!atext is string,!labelType is dbref)
+	!type = !element.type
+	!name = !element.name
+	!sytm = !labelType.name
+	if(!type eq 'INST')then
+		!colour = 10
+		--【本次修复】上面这行 INST 的颜色赋值在 23.98 被我的锚点误吃，管道图因此报 (46,28) Variable COLOUR not defined
+		--【本次新增·按你的要求】仪表点位图（InstLayout）的图面标注改用 6 号（靛蓝）；
+		--   只有 InstLayout 变，管道布置图里的仪表标注仍是老版的 10 号（白）。
+		if(!this.layoutKind eq 'InstLayout')then
+			!colour = 6
+		endif
+	elseif(!type eq 'EQUI')then
+		!colour = 10
+	elseif(!type eq 'NOZZ')then
+		!colour = 127
+	elseif(!type eq 'ATTA')then
+		!colour = 23
+	else
+		!colour = 37
+	endif
+	--【本次新增·按你的要求】设备名标注字号 5mm（其它类别仍是 2.5mm）
+	!chei = 2.5
+	--【2026-10-31·按你的要求】仪表(INST)标注字高 2mm
+	if(!type eq 'INST')then
+		!chei = 2
+	endif
+	if(!type eq 'EQUI')then
+		--【2026-10-31】只有设备布置图用 5mm；管道布置图里设备名跟管道标注一样大小
+		if(!this.layoutKind eq 'EquiLayout')then
+			!chei = 5
+		endif
+	endif
+	NEW SLABEL
+	DDNM $!type $!name
+	XYPS 0  0
+	LLCL 0mm
+	--【2026-10-31·按你的要求】TSIZ 跟 CHEI 一起走（INST=2 / 其它 2.5 / EquiLayout 设备名 5）；
+	--   只改 CHEI 不生效，可见字高实际由 TSIZ 定。
+	TSIZ $!chei mm
+	LTER Off
+	LLEA true
+	BPOF 0mm 0mm
+	LSHA Straight
+	FONT 1
+	BLNK true
+	BMAR 0mm
+	CHEI $!chei mm
+	TXCOLO $!colour
+	LLSTYL Solid
+	LLCOLO $!colour
+	LFSTYL Solid
+	LFCOLO $!colour
+	JUST Left
+	ALIGN Bbody
+	--【本次修复·按你的要求】空文字的标注不建：
+	--   PDMS 对空文字每建一条就报一次 Warning: Null text string for this codeword
+	--   （你日志里那一串），画出来也只是个空框。这里跳过（23.159 起不再打印元件名）。
+	if(!atext.Empty())then
+		return
+	endif
+	--【本次修复】符号库的文本 codeword 分两套：NOZZ/PIPE/SUPP 用 #ATEX，INST/EQUI 用 #ATEXT。
+	--   原来只设了 ATEX，另一套就取不到文字 —— 两个都设，谁都能取到。
+	--【23.157 修改·按你的反馈】改用对象接口写入：命令行形式会被文字里的引号截断
+	!this.SetSlabText(!atext)
+	TMRF SYTM $!sytm
+endmethod
+--------------------------------------------------------------------------------------
+define method .LayerGenerate(!name is string)
+	NEW LAYER $!name
+	handle(41,12)
+		!back = !!ce
+		$!name
+		delete LAYER
+		$!back
+		name $!name
+	endhandle
+	UCOD mm  Distance   mm  Bore Nominal
+	FONT 11
+	LTER Off
+	JUST Left
+	ALIGN Bbody
+	DTER Arrows
+	TSIZ 2.5mm
+	CHOS 6mm
+	ASUB 0degree
+	PJUS Towards
+	OSHT 2mm
+	PLCL 0mm
+	DOFF 25mm
+	DMSP 0mm
+	CHEI 2.5mm
+	LLEA true
+	LFRA true
+	LSHA Straight
+	GBOX 1mm
+	CSPA 0
+	LSPA 0
+	LLCL 0mm
+	XYPS 25mm 25mm
+	BPOF 0mm 0mm
+	BLNK true
+	BMAR 0mm
+	FTER Default
+	PCODE mms to 0 dpls  Inches to 1 dpls  Fractions to 32 ths  Angles to 1 dpls
+	NTEXT unset
+	TXCOLO 10
+	NLSTYL Solid
+	NLCOLO 1
+	FSTYLE Off
+	FCOLOUR 1
+	LLSTYL Solid
+	LLCOLO 1
+	LFSTYL Solid
+	LFCOLO 1
+	DLSTYL Solid
+	DLCOLO 10
+	PLSTYL Solid
+	PLCOLO 10
+	MSTYLE Off
+	MCOLOUR 1
+	CHSTYL Off
+	CHCOLO 1
+	POSFOR ENU
+endmethod
+--------------------------------------------------------------------------------------
+--【本次新增·按你的要求】按"标注相对被标对象的方位"给标注发反方向的 Cpoffset（文字微调）。
+--
+--   【为什么读 .xypos 就够了】GenerateNote 建的是 SLABEL：`DDNM <type> <name>` 绑到模型对象、
+--   `XYPS 0 0`（贴在对象上），之后 AnnotationOptimization 用 `offset x y` 把它挪到候选方位
+--   （CostBuild 给的 12 个 30° 方向、7mm 逐圈递进）。所以 **.xypos 就是"相对被标对象"的偏移量**
+--   —— 正负号直接给出方位，不必再去查对象在图纸上的投影坐标。
+--   这也是老插件 pipelayout.pmlfrm:6076-6093 的既有做法（它读的就是 note.xypos.east/north）。
+--
+--   【规则（!kind）】
+--     PIPE 管线号：四个象限，反方向斜移，每轴 2.82mm（2.82 × √2 ≈ 4mm，即沿 45° 反向移 4mm）
+--     SUPP 支架  ：斜方向（四个象限）反向 1.7mm；正方向（东西南北）反向 3.5mm
+--                  —— 沿用老插件 pipelayout.pmlfrm:6074-6095 的取值，未擅自改动
+--     INST 仪表  ：按 xypos 的**精确反方向**移动，长度 4mm（连续方向，不做象限量化）
+--   正好落在对象上（xypos 两轴都为 0）时不动。
+--
+--   【写法参照】"导航到元素 -> 发 Draft 命令"这个形态与本文件 AnnotationOptimization 末尾的
+--   `$!db` + `offset x $!xoff y $!yoff` 完全一致；`Cpoffset` 命令本身来自老插件。
+define method .ApplyCpoffset(!slabs is array,!kind is string)
+	!back = !!ce
+	do !ptrslabs indices !slabs
+		--【PML 语义】要保护的语句写在 handle **前面**；handle 块里是"出错才执行"的兜底。
+		--   取证：MyTools/forms/pipelayout.pmlfrm:2776-2779 —— 循环体内就是这个写法。
+		!readBad = false
+		!slab = !slabs[$!ptrslabs]
+		$!slab
+		!offx = !slab.xypos.east
+		!offy = !slab.xypos.north
+	handle any
+		--取不到 xypos（该标注没定位成功等）：这条不动，绝不因此中断整个 Generate
+		!readBad = true
+	endhandle
+		if(!readBad)then
+			skip
+		elseif(!offx eq 0 and !offy eq 0)then
+			skip
+		elseif(!kind eq 'PIPE')then
+			--管线号：四个象限 -> 反方向斜移，每轴 2.82mm
+			if(!offx ge 0 and !offy ge 0)then
+				Cpoffset -2.82 -2.82
+			elseif(!offx lt 0 and !offy gt 0)then
+				Cpoffset 2.82 -2.82
+			elseif(!offx lt 0 and !offy lt 0)then
+				Cpoffset 2.82 2.82
+			else
+				Cpoffset -2.82 2.82
+			endif
+		elseif(!kind eq 'SUPP')then
+			--支架：正方向（东西南北）3.5mm、斜方向 1.7mm
+			if(!offx eq 0 and !offy gt 0)then
+				Cpoffset 0 -3.5
+			elseif(!offx eq 0 and !offy lt 0)then
+				Cpoffset 0 3.5
+			elseif(!offx gt 0 and !offy eq 0)then
+				Cpoffset -3.5 0
+			elseif(!offx lt 0 and !offy eq 0)then
+				Cpoffset 3.5 0
+			elseif(!offx lt 0 and !offy gt 0)then
+				Cpoffset 1.7 -1.7
+			elseif(!offx gt 0 and !offy gt 0)then
+				Cpoffset -1.7 -1.7
+			elseif(!offx gt 0 and !offy lt 0)then
+				Cpoffset -1.7 1.7
+			else
+				Cpoffset 1.7 1.7
+			endif
+		else
+			--仪表：精确反方向，长度 4mm
+			--  长度用 AVEVA 既有写法 sqrt(power(x,2)+power(y,2))（见 opTraycode.pmlfrm:216）
+			!len = sqrt(power(!offx,2) + power(!offy,2))
+			if(!len gt 0)then
+				!cx = -4 * !offx / !len
+				!cy = -4 * !offy / !len
+				--  数值带 mm 单位（.xypos 是长度），.string() 出来的串要先把单位剥掉再拼命令
+				!cxText = !cx.string('D3')
+				if(!cxText.match(|mm|) gt 0)then
+					!cxText = !cxText.before('mm')
+				endif
+				!cyText = !cy.string('D3')
+				if(!cyText.match(|mm|) gt 0)then
+					!cyText = !cyText.before('mm')
+				endif
+				!coText = !cxText + ' ' + !cyText
+				Cpoffset $!coText
+			endif
+		endif
+	enddo
+	$!back
+endmethod
+--------------------------------------------------------------------------------------
+--【23.157 新增·按你的反馈】把标注文字写进"当前标注"（!!ce）—— **安全版**。
+--   背景：原来用命令形式 `ATEXT '$!mess'`，那是把文本**代入命令行再解析**；
+--   本项目管名里有英寸单引号（形如 1/2'SSH900-7X0101-…），代入后会把 PML 字符串截断，
+--   报 `(47,50) CP: Meaningless symbol(s) in command line`（实测 23.157）。
+--   改法：用**对象接口赋值**（RHS 是变量，不经过命令行词法分析），任意字符都能原样写入。
+--   依据：AVEVA 自己的 supports\draft\functions\MdsDetailPlots.pmlfnc:368 `!!ce.atext = !atext`、
+--         MdsAbaLocPlan.pmlfnc:231 `!!ce.atex = !atext` 就是这么写的。
+--   两个属性都设（两套文本 codeword：#ATEXT 与 #ATEX），任一成功即可。
+--   万一某环境下属性不可写：退回命令形式（把 `'` 与 `"` 换成反引号），并打印提示。
+define method .SetSlabText(!mess is string)
+	--【23.162 薄壳】实现已收敛到 TextWriter.WriteSlab（全插件唯一一份三级兜底）。
+	--   保留本方法名：20+ 个调用点一处都不用改。
+	!writer = object TextWriter()
+	!writer.WriteSlab(!mess)
+	endmethod
+--------------------------------------------------------------------------------------
+--【2026-10-31 新增·按你的要求】best-fit first：按标注框面积降序就地排序。
+--   大框更难安置，先放它们，避免小框占满好位置后大框无处可去。
+define method .SortByDifficulty(!list is array) is array
+	--【2026-10-31 修正】用插入排序（O(n²)）：冒泡最坏要 n 遍，300 条会卡。
+	!n = !list.size()
+	if(!n lt 2)then
+		return !list
+	endif
+	do !i from 2 to !n
+		!item = !list[$!i]
+		!ia = !item.xLen * !item.yLen
+		!j = !i - 1
+		do !k from 1 to !i
+			if(!j lt 1)then
+				break
+			endif
+			!cur = !list[$!j]
+			if(!cur.xLen * !cur.yLen lt !ia)then
+				!list[$!j + 1] = !cur
+				!j = !j - 1
+			else
+				break
+			endif
+		enddo
+		!list[$!j + 1] = !item
+	enddo
+	return !list
+endmethod
+--------------------------------------------------------------------------------------
+--【2026-10-31 新增】冲突消除用的 12 个候选方向（惰建）
+define method .BuildDirs() is array
+	if(!this.repairDirs.unset())then
+		!d = object array()
+		!v = object array()
+		!v[1] = 0.5
+		!v[2] = 0.866025
+		!d.append(!v)
+		!v = object array()
+		!v[1] = 0.866025
+		!v[2] = 0.5
+		!d.append(!v)
+		!v = object array()
+		!v[1] = 1
+		!v[2] = 0
+		!d.append(!v)
+		!v = object array()
+		!v[1] = 0.866025
+		!v[2] = 0.5 * (0 - 1)
+		!d.append(!v)
+		!v = object array()
+		!v[1] = 0.5
+		!v[2] = 0.866025 * (0 - 1)
+		!d.append(!v)
+		!v = object array()
+		!v[1] = 0
+		!v[2] = 0 - 1
+		!d.append(!v)
+		!v = object array()
+		!v[1] = 0.5 * (0 - 1)
+		!v[2] = 0.866025 * (0 - 1)
+		!d.append(!v)
+		!v = object array()
+		!v[1] = 0.866025 * (0 - 1)
+		!v[2] = 0.5 * (0 - 1)
+		!d.append(!v)
+		!v = object array()
+		!v[1] = 0 - 1
+		!v[2] = 0
+		!d.append(!v)
+		!v = object array()
+		!v[1] = 0.866025 * (0 - 1)
+		!v[2] = 0.5
+		!d.append(!v)
+		!v = object array()
+		!v[1] = 0.5 * (0 - 1)
+		!v[2] = 0.866025
+		!d.append(!v)
+		!v = object array()
+		!v[1] = 0
+		!v[2] = 1
+		!d.append(!v)
+		!this.repairDirs = !d
+	endif
+	return !this.repairDirs
+endmethod
+--------------------------------------------------------------------------------------
+--【2026-10-31 新增】两个标注框（以中心 + 宽高）是否重叠
+define method .BoxHit(!ax is real,!ay is real,!aw is real,!ah is real,!bx is real,!by is real,!bw is real,!bh is real) is boolean
+	if(abs(!ax - !bx) lt (!aw + !bw) / 2)then
+		if(abs(!ay - !by) lt (!ah + !bh) / 2)then
+			return true
+		endif
+	endif
+	return false
+endmethod
+--------------------------------------------------------------------------------------
+--【2026-10-31 新增】把第 idx 个标注挪到最近的“不重叠、且在图框内”的候选位置
+---------------------------------------------------------------------------
+--【2026-10-31·按你的要求】“出口搜索”：当所有常规候选都在设备包围盒里时，
+--   按 escapeRadii 逐步放远、逐个方向试，找到**不压几何且在图框内**的最近位置。
+--   返回 array[1]=dx, array[2]=dy；找不到返回空数组。
+define method .FindEscape(!cx is real,!cy is real,!hw is real,!hh is real) is array
+	!none = object array()
+	!dirs = !this.BuildDirs()
+	!radii = !this.escapeRadii
+	if(!radii.unset())then
+		return !none
+	endif
+	do !ri indices !radii
+		!rad = !radii[$!ri]
+		do !di indices !dirs
+			!dx = !rad * !dirs[$!di][1]
+			!dy = !rad * !dirs[$!di][2]
+			!px = !cx + !dx
+			!py = !cy + !dy
+			!inFrame = false
+			if(abs(!px - !this.frameCX) le !this.frameHX)then
+				if(abs(!py - !this.frameCY) le !this.frameHY)then
+					!inFrame = true
+				endif
+			endif
+			if(!inFrame)then
+				!pen = !this.BoxHitPen(!px,!py,!hw,!hh)
+				--【2026-10-31·按你的要求】只要不压**高优先级**对象就算找到了家；
+				--   压着设备(6000)/管线(20000) 也比把引线拉长强。
+				if(!pen lt !this.escapeMinPen)then
+					!res = object array()
+					!res.append(!dx)
+					!res.append(!dy)
+					return !res
+				endif
+			endif
+		enddo
+	enddo
+	return !none
+endmethod
+define method .TryRelocate(!list is array,!idx is real) is boolean
+	!me = !list[$!idx]
+	!dirs = !this.BuildDirs()
+	!tier = !this.greedyTier
+	!gap = !this.greedyGap
+	do !k from 1 to !tier
+		do !p indices !dirs
+			!ox = !gap * !k * !dirs[$!p][1]
+			!oy = !gap * !k * !dirs[$!p][2]
+			!nx = !me.xPos + !ox
+			!ny = !me.yPos + !oy
+			if(abs(!nx - !this.frameCX) le !this.frameHX and abs(!ny - !this.frameCY) le !this.frameHY)then
+				!clash = false
+				!ghw2 = !me.xLen / 2 - !this.geomInset
+				!ghh2 = !me.yLen / 2 - !this.geomInset
+				if(!ghw2 lt 1)then
+					!ghw2 = 1
+				endif
+				if(!ghh2 lt 1)then
+					!ghh2 = 1
+				endif
+				!gh = !this.BoxHitPen(!nx,!ny,!ghw2,!ghh2)
+				if(!gh gt 0)then
+					!clash = true
+				endif
+				--【2026-11-01·性能】原来每个候选都对**全表**调 BoxHit()（方法调用 ~0.7ms），
+				--   300 个标注 × 48 候选 = 1.4 万次调用，这就是进度卡 100 的原因。
+				--   改成先用纯算术判两个框是否相交，只有真相交时才调方法。
+				do !q indices !list
+					if(!q ne !idx)then
+						!o = !list[$!q]
+						!odx = abs(!nx - !o.xPos - !o.xoff)
+						if(!odx lt (!me.xLen + !o.xLen) / 2)then
+							!ody = abs(!ny - !o.yPos - !o.yoff)
+							if(!ody lt (!me.yLen + !o.yLen) / 2)then
+								!hit = !this.BoxHit(!nx,!ny,!me.xLen,!me.yLen,!o.xPos + !o.xoff,!o.yPos + !o.yoff,!o.xLen,!o.yLen)
+								if(!hit)then
+									!clash = true
+								endif
+							endif
+						endif
+					endif
+				enddo
+				if(!clash.not())then
+					--【2026-10-31 修正】必须对数组元素赋值：
+					--   `!me = !list[$!idx]` 拿到的是副本，改副本不会回写。
+					!list[$!idx].xoff = !ox
+					!list[$!idx].yoff = !oy
+					return true
+				endif
+			endif
+		enddo
+	enddo
+	return false
+endmethod
+--------------------------------------------------------------------------------------
+--【2026-10-31 新增·按你的说明】设备名排到视图外围：
+--   模板 = <图名>/DIMLABELS/<方向>-Bbody（与四周引线标注同一套），折线引线 LSHA Bent。
+--   四个方向各一列，同侧按沿边坐标排序后顺序堆叠（间隔 plateSpace）。
+define method .GenerateEquiPlateLabels()
+	!this.GreedyDefaults()
+	!view = !this.view
+	!ldg = object LimitDbelementGet()
+	!ldg.view = !view
+	!volume = !ldg.GetVolume()
+	!this.plateFromE = !volume.from.east
+	!this.plateFromN = !volume.from.north
+	!this.plateToE = !volume.to.east
+	!this.plateToN = !volume.to.north
+	!this.sheetScale = !view.vscale		$*模型坐标×比例=图面坐标
+	!eastItems = object array()
+	!westItems = object array()
+	!northItems = object array()
+	!southItems = object array()
+	!list = !ldg.GetDrawListElement('EQUI')
+	do !i indices !list
+		!el = !list[$!i]
+		!p = !el.pos.wrt(world)
+		!item = object array()
+		!item[1] = !el
+		!item[2] = !p.east
+		!item[3] = !p.north
+		!dE = !this.plateToE - !p.east
+		!dW = !p.east - !this.plateFromE
+		!dN = !this.plateToN - !p.north
+		!dS = !p.north - !this.plateFromN
+		!best = !dE
+		!side = 'EAST'
+		if(!dW lt !best)then
+			!best = !dW
+			!side = 'WEST'
+		endif
+		if(!dN lt !best)then
+			!best = !dN
+			!side = 'NORTH'
+		endif
+		if(!dS lt !best)then
+			!best = !dS
+			!side = 'SOUTH'
+		endif
+		if(!side eq 'EAST')then
+			!eastItems.append(!item)
+		elseif(!side eq 'WEST')then
+			!westItems.append(!item)
+		elseif(!side eq 'NORTH')then
+			!northItems.append(!item)
+		else
+			!southItems.append(!item)
+		endif
+	enddo
+	!drawingName = !view.owner.owner.name
+	!layerName = !view.name + '/EQUI_Labs'
+	!this.LayerGenerate(!layerName)
+	!this.PlacePlateSide(!eastItems,'EAST',!drawingName)
+	!this.PlacePlateSide(!westItems,'WEST',!drawingName)
+	!this.PlacePlateSide(!northItems,'NORTH',!drawingName)
+	!this.PlacePlateSide(!southItems,'SOUTH',!drawingName)
+endmethod
+--------------------------------------------------------------------------------------
+--【2026-10-31 新增】单一侧的排列：排序 → 沿边堆叠 → 建标注
+define method .PlacePlateSide(!items is array,!side is string,!drawingName is string)
+	!n = !items.size()
+	if(!n lt 1)then
+		return
+	endif
+	!byNorth = true
+	if(!side eq 'NORTH' or !side eq 'SOUTH')then
+		!byNorth = false
+	endif
+	do !i from 2 to !n
+		!it = !items[$!i]
+		!k = !it[3]
+		if(!byNorth)then
+			!k = !it[2]
+		endif
+		!j = !i - 1
+		do !loop from 1 to !i
+			if(!j lt 1)then
+				break
+			endif
+			!cur = !items[$!j]
+			!ck = !cur[3]
+			if(!byNorth)then
+				!ck = !cur[2]
+			endif
+			if(!ck gt !k)then
+				!items[$!j + 1] = !cur
+				!j = !j - 1
+			else
+				break
+			endif
+		enddo
+		!items[$!j + 1] = !it
+	enddo
+	!margin = !this.plateMargin / !this.sheetScale	$*mm(图面)→mm(模型)
+	!space = !this.plateSpace / !this.sheetScale
+	!last = 0 - 1000000
+	!first = true
+	do !i indices !items
+		!it = !items[$!i]
+		!el = !it[1]
+		!ex = !it[2]
+		!ey = !it[3]
+		!lx = !ex
+		!ly = !ey
+		if(!side eq 'EAST')then
+			!lx = !this.plateToE + !margin
+			!ly = !ey
+			if(!first.not())then
+				if(!ly lt !last + !space)then
+					!ly = !last + !space
+				endif
+			endif
+			if(!ly gt !this.plateToN)then
+				!ly = !this.plateToN
+			endif
+			!last = !ly
+		elseif(!side eq 'WEST')then
+			!lx = !this.plateFromE - !margin
+			!ly = !ey
+			if(!first.not())then
+				if(!ly lt !last + !space)then
+					!ly = !last + !space
+				endif
+			endif
+			if(!ly gt !this.plateToN)then
+				!ly = !this.plateToN
+			endif
+			!last = !ly
+		elseif(!side eq 'NORTH')then
+			!ly = !this.plateToN + !margin
+			!lx = !ex
+			if(!first.not())then
+				if(!lx lt !last + !space)then
+					!lx = !last + !space
+				endif
+			endif
+			if(!lx gt !this.plateToE)then
+				!lx = !this.plateToE
+			endif
+			!last = !lx
+		else
+			!ly = !this.plateFromN - !margin
+			!lx = !ex
+			if(!first.not())then
+				if(!lx lt !last + !space)then
+					!lx = !last + !space
+				endif
+			endif
+			if(!lx gt !this.plateToE)then
+				!lx = !this.plateToE
+			endif
+			!last = !lx
+		endif
+		!first = false
+		!this.MakePlateLabel(!el,!side,!lx,!ly,!ex,!ey,!drawingName)
+	enddo
+endmethod
+--------------------------------------------------------------------------------------
+--【2026-10-31 新增】建一条外围设备名标注（DIMLABELS 模板 + 折线引线）
+define method .MakePlateLabel(!el is dbref,!side is string,!lx is real,!ly is real,!ex is real,!ey is real,!drawingName is string)
+	!p = !el.pos.wrt(world)
+	!elM = !p.up / 1000
+	!elText = !elM.string('D2')
+	if(!elText.match(|mm|) gt 0)then
+		!elText = !elText.before('mm')
+	endif
+	!nm = !el.name
+	if(!nm.unset())then
+		!nm = ''
+	endif
+	!msg = !nm + ' EL ' + !elText + ' m'
+	!sytm = !drawingName + '/DIMLABELS/' + !side + '-Bbody'
+	--【2026-10-31 修正】模型差 × 比例 = 图面 mm，与官方 GetPipelineMessage 同一口径
+	!dx = (!lx - !ex) * !this.sheetScale
+	!dy = (!ly - !ey) * !this.sheetScale
+	NEW SLABEL
+	DDNM EQUI $!el
+	XYPS 0 0
+	LLCL 0mm
+	TSIZ 2.5
+	LTER Off
+	LLEA true
+	LSHA Bent
+	FONT 1
+	BLNK true
+	BMAR 0mm
+	CHEI 2.5mm
+	TXCOLO 10
+	LLSTYL Solid
+	LLCOLO 10
+	LFSTYL Solid
+	LFCOLO 10
+	JUST Left
+	ALIGN Bbody
+	!this.SetSlabText(!msg)
+	TMRF SYTM $!sytm
+	offset x $!dx y $!dy
+endmethod
+--------------------------------------------------------------------------------------
+--【2026-10-31 新增·按你的要求】模拟退火（Simulated Annealing）的**阈值接受**变体。
+--   PML 没有 random()/没有 exp()，所以：
+--     随机序列：黄金比位移的伪随机（seed = seed*1.37 + 0.618...，取小数部分）
+--     接受规则：新代价 < 旧代价 + T 就接受（T 按几何级递减）——等价于 "以概率接受略差解"，
+--     又避开了只能用 exp 才能算的概率。（Dueck & Scheuer 的 Threshold Accepting）
+--   只动“仍有冲突”的标注；干净的不碰，保证性能与结果稳定。
+define method .AnnealLabels(!list is array)
+	!n = !list.size()
+	if(!n lt 2)then
+		return
+	endif
+	!budget = !this.annealIterations
+	!this.annealAccepted = 0		$*先置 0，提前 return 时也能读
+	if(!budget lt 1)then
+		return
+	endif
+	--① 找出仍有冲突的标注（两两相交即算）
+	!hot = object array()
+	do !i from 1 to !n
+		!a = !list[$!i]
+		!ax = !a.xPos + !a.xoff
+		!ay = !a.yPos + !a.yoff
+		--【2026-10-31】否则最后一个标注会出现 start>end 的 do 初始化，PML 会报错
+		if(!i lt !n)then
+		do !j from (!i + 1) to !n
+			!b = !list[$!j]
+			!bx = !b.xPos + !b.xoff
+			!by = !b.yPos + !b.yoff
+			!hx = (!a.xLen + !b.xLen) / 2
+			!hy = (!a.yLen + !b.yLen) / 2
+			if(abs(!ax - !bx) lt !hx)then
+				if(abs(!ay - !by) lt !hy)then
+					!hot.append(!i)
+					!hot.append(!j)
+				endif
+			endif
+		enddo
+		endif
+	enddo
+	!hotN = !hot.size()
+	if(!hotN lt 1)then
+		--【2026-10-31】没有冲突也记一行，不然分不清是“没跑”还是“跑了没事可做”
+		!!fmsys.SETPROGRESSTEXT('Optimizing label layout - no overlaps to fix ...')
+		!this.AnnealLog(!hotN,0,!this.annealIterations)
+		return
+	endif
+	--② 预先算好每个冲突标注的邻居短名单（按锚点位置，半径 annealRadius）
+	--   这样退火每次代价评估只跑短名单，不再扫全表。
+	!rr = !this.annealRadius
+	!rr2 = !rr * !rr
+	!neighOf = object array()
+	!built = object array()
+	--【2026-10-31 修正】用空数组初始化而不是 false：PML 数组定型后不能往布尔元素里存对象
+	do !i from 1 to !n
+		!neighOf.append(object array())
+		!built.append(0)
+	enddo
+	do !hk from 1 to !hotN
+		!hi = !hot[$!hk]
+		if(!built[$!hi] eq 0)then
+			!built[$!hi] = 1
+			--【2026-11-01·性能】短名单封顶 16 个：半径内太多就逐步缩小半径再建，
+			--   否则 SA 每步都要跑几百个 CostCalculation，慢得没边。
+			!lst = object array()
+			!meH = !list[$!hi]
+			!r2loc = !rr2
+			do !rep from 1 to 4
+				!lst = object array()
+				do !j from 1 to !n
+					if(!j ne !hi)then
+						!o = !list[$!j]
+						!ddx = !o.xPos - !meH.xPos
+						!ddy = !o.yPos - !meH.yPos
+						if(!ddx * !ddx + !ddy * !ddy lt !r2loc)then
+							!lst.append(!j)
+						endif
+					endif
+				enddo
+				if(!lst.size() le 16)then
+					break
+				endif
+				!r2loc = !r2loc / 4
+			enddo
+			!neighOf[$!hi] = !lst
+		endif
+	enddo
+	--② 退火循环
+	!dirs = !this.BuildDirs()
+	!tier = !this.greedyTier
+	!gap = !this.greedyGap
+	!seed = 0.1234567
+	!accepted = 0
+	--【2026-10-31·按你的要求】退火阶段显示进度条 + 工作内容
+	!!fmsys.SETPROGRESSTEXT('Optimizing label layout - simulated annealing ...')
+	!lastFrac = 0
+	do !it from 1 to !budget
+		--【2026-10-31】每跨 5% 才刷新一次，不然界面往返太密
+		!frac = !it / !budget
+		if(!frac ge !lastFrac)then
+			!lastFrac = !lastFrac + 0.05
+			!!fmsys.SETPROGRESS(!frac * 100)
+		endif
+		!temp = !this.annealTemp0 * power(!this.annealCooling,!it)
+		-- 随机挑一个冲突标注
+		--【2026-10-31 修正】每步必须取小数部分；否则 seed 每轮×1.37 会无界增长，
+		--   跑到几百次就数值溢出报错（实测 5 次正常、400 次失败）。
+		!seed = !seed * 1.37 + 0.6180339887
+		!seed = !seed - !seed.int()
+		!r = !seed
+		--【2026-10-31 修正】括号算术表达式不能直接挂 .int()（E-12），先赋临时变量
+		!tmpR = !r * !hotN
+		!pick = 1 + !tmpR.int()
+		if(!pick gt !hotN)then
+			!pick = !hotN
+		endif
+		!idx = !hot[$!pick]
+		!me = !list[$!idx]
+		!cur = !this.LabelLocalCost(!list,!idx,!me.xoff,!me.yoff,!neighOf[$!idx])
+		-- 随机候选（圈数 + 12 个方向里挑）
+		!seed = !seed * 1.37 + 0.6180339887
+		!seed = !seed - !seed.int()
+		!r2 = !seed
+		!tmpK = !r2 * !tier
+		!k = 1 + !tmpK.int()
+		if(!k gt !tier)then
+			!k = !tier
+		endif
+		!seed = !seed * 1.37 + 0.6180339887
+		!seed = !seed - !seed.int()
+		!r3 = !seed
+		!tmpP = !r3 * 12
+		!p = 1 + !tmpP.int()
+		if(!p gt 12)then
+			!p = 12
+		endif
+		!nx = !gap * !k * !dirs[$!p][1]
+		!ny = !gap * !k * !dirs[$!p][2]
+		!moved = true
+		if(!nx eq !me.xoff)then
+			if(!ny eq !me.yoff)then
+				!moved = false
+			endif
+		endif
+		--【2026-10-31 修正】PML 里 if(!x) 是“x 为真’；未移动要写 !moved.not()
+		if(!moved.not())then
+			!newC = !cur
+		else
+			!newC = !this.LabelLocalCost(!list,!idx,!nx,!ny,!neighOf[$!idx])
+		endif
+		-- 阈值接受：变好一定收，变差但在温度内也收
+		--【2026-10-31 修正】别把布尔与比较混在一个 and 里，改嵌套 if
+		if(!moved)then
+			if(!newC lt !cur + !temp)then
+				!list[$!idx].xoff = !nx
+				!list[$!idx].yoff = !ny
+				!accepted = !accepted + 1
+			endif
+		endif
+	enddo
+	!!fmsys.SETPROGRESSTEXT('Optimizing label layout - removing overlaps ...')
+	!!fmsys.SETPROGRESS(100)
+	!this.annealAccepted = !accepted
+	!this.AnnealLog(!hotN,!accepted,!budget)
+endmethod
+--------------------------------------------------------------------------------------
+--【2026-10-31 新增】单个标注在给定偏移下的局部代价（与其余所有标注逐个比）
+define method .LabelLocalCost(!list is array,!idx is real,!ox is real,!oy is real,!neigh is array) is real
+	!me = !list[$!idx]
+	!sum = 0
+	!this.curXLen = !me.xLen
+	!this.curYLen = !me.yLen
+	--【2026-10-31】距离预筛：只算半径内的标注。
+	--   一张图 300 个标注时，不筛的话每次局部代价都要跑 300 遍代价函数，400 次退火就是 12 万次调用。
+	--【2026-10-31·性能】只对**预先算好的短名单**跑代价：
+	--   退火里每次都扫全表的话，300 标注 × 250 轮 × 2 次 = 15 万次调用。
+	!nn = !neigh.size()
+	do !k from 1 to !nn
+		!j = !neigh[$!k]
+		!o = !list[$!j]
+		!this.exXLen = !o.xLen
+		!this.exYLen = !o.yLen
+		!sum = !sum + !this.CostCalculation(!o.xPos,!o.xoff,!o.yPos,!o.yoff,!me.xPos,!me.yPos,!ox,!oy,0)
+	enddo
+	--【2026-10-31·方案A】几何惩罚（每个候选一次）
+	!ghw = !me.xLen / 2 - !this.geomInset
+	!ghh = !me.yLen / 2 - !this.geomInset
+	if(!ghw lt 1)then
+		!ghw = 1
+	endif
+	if(!ghh lt 1)then
+		!ghh = 1
+	endif
+	!gh = !this.BoxHitPen(!me.xPos + !ox,!me.yPos + !oy,!ghw,!ghh)
+	!sum = !sum + !gh		$*【2026-10-31】不同类几何惩罚不同（管线<仪表/阀门）
+	return !sum
+endmethod
+--------------------------------------------------------------------------------------
+--【2026-10-31 新增】单轮确定性冲突消除（原本内联在 AnnotationOptimization 里，现在抽成方法）
+--   对每一对重叠的标注，把后放的那个挪到最近的可行位置；返回被挪过的个数。
+---------------------------------------------------------------------------
+--【2026-11-01】统计一条引线与其它引线的相交次数（不限邻域，全量比）。
+define method .LeaderCrossCount(!list is array,!idx is real,!ox is real,!oy is real) is real
+	!cnt = 0.0
+	!me = !list[$!idx]
+	!q1x = !me.xPos
+	!q1y = !me.yPos
+	!q2x = !me.xPos + !ox
+	!q2y = !me.yPos + !oy
+	!n = !list.size()
+	do !j from 1 to !n
+		if(!j ne !idx)then
+			!o = !list[$!j]
+			!p1x = !o.xPos
+			!p1y = !o.yPos
+			!p2x = !o.xPos + !o.xoff
+			!p2y = !o.yPos + !o.yoff
+			!d1 = (!p2x - !p1x) * (!q1y - !p1y) - (!p2y - !p1y) * (!q1x - !p1x)
+			!d2 = (!p2x - !p1x) * (!q2y - !p1y) - (!p2y - !p1y) * (!q2x - !p1x)
+			!d3 = (!q2x - !q1x) * (!p1y - !q1y) - (!q2y - !q1y) * (!p1x - !q1x)
+			!d4 = (!q2x - !q1x) * (!p2y - !q1y) - (!q2y - !q1y) * (!p2x - !q1x)
+			if(!d1 * !d2 lt 0 and !d3 * !d4 lt 0)then
+				!cnt = !cnt + 1
+			endif
+		endif
+	enddo
+	return !cnt
+endmethod
+---------------------------------------------------------------------------
+--【2026-11-01】**专门消除交叉**：常规候选最远只到 36mm，跑不出就会接受交叉；
+--   这里对仍有交叉的标注，按 crossFixRadii 远移找“不交叉、不压高优先级、在图框内”的位置。
+---------------------------------------------------------------------------
+--【2026-11-01】冲突数 = 引线相交 + 引线穿过对方标注框（后者看起来也就是“交叉”）
+define method .LeaderConflictCount(!list is array,!idx is real,!ox is real,!oy is real) is real
+	!cnt = !this.LeaderCrossCount(!list,!idx,!ox,!oy)
+	!me = !list[$!idx]
+	!ax = !me.xPos
+	!ay = !me.yPos
+	!bx = !me.xPos + !ox
+	!by = !me.yPos + !oy
+	!n = !list.size()
+	do !j from 1 to !n
+		if(!j ne !idx)then
+			!o = !list[$!j]
+			!ohw = !o.xLen / 2
+			!ohh = !o.yLen / 2
+			!hitB = !this.SegRectHit(!ax,!ay,!bx,!by,!o.xPos + !o.xoff,!o.yPos + !o.yoff,!ohw,!ohh)
+			if(!hitB)then
+				!cnt = !cnt + 1
+			endif
+		endif
+	enddo
+	return !cnt
+endmethod
+---------------------------------------------------------------------------
+--【2026-11-01·性能】只跟“附近邻居”比的冲突计数（全量比对在标注多时是 O(n²)，每个候选都全扫一遍太慢）。
+define method .LeaderConflictSub(!list is array,!idx is real,!near is array,!ox is real,!oy is real) is real
+	!cnt = 0.0
+	!me = !list[$!idx]
+	!q1x = !me.xPos
+	!q1y = !me.yPos
+	!q2x = !me.xPos + !ox
+	!q2y = !me.yPos + !oy
+	!mhw = !me.xLen / 2
+	!mhh = !me.yLen / 2
+	!nn = !near.size()
+	do !k from 1 to !nn
+		!j = !near[$!k]
+		!o = !list[$!j]
+		!p1x = !o.xPos
+		!p1y = !o.yPos
+		!p2x = !o.xPos + !o.xoff
+		!p2y = !o.yPos + !o.yoff
+		!d1 = (!p2x - !p1x) * (!q1y - !p1y) - (!p2y - !p1y) * (!q1x - !p1x)
+		!d2 = (!p2x - !p1x) * (!q2y - !p1y) - (!p2y - !p1y) * (!q2x - !p1x)
+		!d3 = (!q2x - !q1x) * (!p1y - !q1y) - (!q2y - !q1y) * (!p1x - !q1x)
+		!d4 = (!q2x - !q1x) * (!p2y - !q1y) - (!q2y - !q1y) * (!p2x - !q1x)
+		if(!d1 * !d2 lt 0 and !d3 * !d4 lt 0)then
+			!cnt = !cnt + 1
+		endif
+		!ohw = !o.xLen / 2
+		!ohh = !o.yLen / 2
+		!hitB = !this.SegRectHit(!q1x,!q1y,!q2x,!q2y,!o.xPos + !o.xoff,!o.yPos + !o.yoff,!ohw,!ohh)
+		if(!hitB)then
+			!cnt = !cnt + 1
+		endif
+	enddo
+	--自己的框与旁边的框重叠也算冲突
+	do !k from 1 to !nn
+		!j = !near[$!k]
+		!o = !list[$!j]
+		!dx = abs(!q2x - !o.xPos - !o.xoff)
+		!dy = abs(!q2y - !o.yPos - !o.yoff)
+		if(!dx lt (!mhw + !o.xLen / 2))then
+			if(!dy lt (!mhh + !o.yLen / 2))then
+				!cnt = !cnt + 1
+			endif
+		endif
+	enddo
+	return !cnt
+endmethod
+---------------------------------------------------------------------------
+--【2026-11-01·性能版】消除交叉：先全量筛一遍“谁有冲突”，只对这些标注做移位；
+--   候选评估只跟 250mm 内的邻居比（不再每次扫全表）。
+define method .CrossFixPass(!list is array) is real
+	!n = !list.size()
+	!moved = 0.0
+	if(!n lt 2)then
+		return 0.0
+	endif
+	!radii = !this.crossFixRadii
+	!dirs = !this.BuildDirs()
+	if(!radii.unset())then
+		return 0.0
+	endif
+	!hot = object array()
+	do !i from 1 to !n
+		!me = !list[$!i]
+		!c0 = !this.LeaderConflictCount(!list,!i,!me.xoff,!me.yoff)
+		if(!c0 gt 0)then
+			!hot.append(!i)
+		endif
+	enddo
+	!hn = !hot.size()
+	if(!hn lt 1)then
+		return 0.0
+	endif
+	do !hi from 1 to !hn
+		!i = !hot[$!hi]
+		!me = !list[$!i]
+		!cur = !this.LeaderConflictCount(!list,!i,!me.xoff,!me.yoff)
+		if(!cur gt 0)then
+			!near = object array()
+			do !j from 1 to !n
+				if(!j ne !i)then
+					!ddx = !list[$!j].xPos - !me.xPos
+					!ddy = !list[$!j].yPos - !me.yPos
+					if(!ddx * !ddx + !ddy * !ddy lt 250000)then
+						!near.append(!j)
+					endif
+				endif
+			enddo
+			!found = false
+			do !ri indices !radii
+				if(!found.not())then
+					do !di indices !dirs
+						if(!found.not())then
+							!nx = !radii[$!ri] * !dirs[$!di][1]
+							!ny = !radii[$!ri] * !dirs[$!di][2]
+							!px = !me.xPos + !nx
+							!py = !me.yPos + !ny
+							!inF = false
+							if(abs(!px - !this.frameCX) le !this.frameHX)then
+								if(abs(!py - !this.frameCY) le !this.frameHY)then
+									!inF = true
+								endif
+							endif
+							if(!inF)then
+								!nc = !this.LeaderConflictSub(!list,!i,!near,!nx,!ny)
+								if(!nc lt !cur)then
+									!ghw = !me.xLen / 2 - !this.geomInset
+									!ghh = !me.yLen / 2 - !this.geomInset
+									if(!ghw lt 1)then
+										!ghw = 1
+									endif
+									if(!ghh lt 1)then
+										!ghh = 1
+									endif
+									!gp = !this.BoxHitPen(!px,!py,!ghw,!ghh)
+									if(!gp lt !this.escapeMinPen)then
+										!me.xoff = !nx
+										!me.yoff = !ny
+										!list[$!i] = !me
+										!moved = !moved + 1
+										!found = true
+									endif
+								endif
+							endif
+						endif
+					enddo
+				endif
+			enddo
+		endif
+	enddo
+	return !moved
+endmethod
+---------------------------------------------------------------------------
+--【2026-11-01·按你的要求】“离得远但附近明明有空位”：做一个**向锚点收缩**的精修。
+--   候选只有三个：往 E、往 N、或两边各收一个 gap(9mm)。
+--   比当前代价低就接受（低与否由 LabelLocalCost 统一判，包含重叠/图框/距离/几何）。
+---------------------------------------------------------------------------
+--【2026-11-01·按你的要求】贪心单趟会留重叠。这里只处理**真正重叠的标注**：
+--   1) 60mm 网格找出重叠对（不是全表两两比）
+--   2) 对每个参与重叠的标注，在 12 方向 × 5 个半径(9~45mm) 里找**代价最低且不重叠**的位置
+--   3) 一轮只改一次，跑两轮就停（不像旧 RepairPass 那样 5 轮反复扫）
+define method .OverlapFixPass(!list is array) is real
+	!n = !list.size()
+	if(!n lt 2)then
+		return 0.0
+	endif
+	!cell = 60
+	!o0 = !list[1]
+	!minX = !o0.xPos + !o0.xoff - !o0.xLen / 2
+	!maxX = !o0.xPos + !o0.xoff + !o0.xLen / 2
+	!minY = !o0.yPos + !o0.yoff - !o0.yLen / 2
+	!maxY = !o0.yPos + !o0.yoff + !o0.yLen / 2
+	do !i from 1 to !n
+		!o = !list[$!i]
+		!bx = !o.xPos + !o.xoff
+		!by = !o.yPos + !o.yoff
+		!x1 = !bx - !o.xLen / 2
+		!x2 = !bx + !o.xLen / 2
+		!y1 = !by - !o.yLen / 2
+		!y2 = !by + !o.yLen / 2
+		if(!x1 lt !minX)then
+			!minX = !x1
+		endif
+		if(!x2 gt !maxX)then
+			!maxX = !x2
+		endif
+		if(!y1 lt !minY)then
+			!minY = !y1
+		endif
+		if(!y2 gt !maxY)then
+			!maxY = !y2
+		endif
+	enddo
+	!cf = (!maxX - !minX) / !cell
+	!cols = !cf.int() + 2
+	!rf = (!maxY - !minY) / !cell
+	!rows = !rf.int() + 2
+	!grid = object array()
+	do !g from 1 to (!cols * !rows)
+		!grid.append(object array())
+	enddo
+	do !i from 1 to !n
+		!o = !list[$!i]
+		!bx = !o.xPos + !o.xoff
+		!by = !o.yPos + !o.yoff
+		!t1 = (!bx - !o.xLen / 2 - !minX) / !cell
+		!c1 = !t1.int()
+		!t2 = (!bx + !o.xLen / 2 - !minX) / !cell
+		!c2 = !t2.int()
+		!t3 = (!by - !o.yLen / 2 - !minY) / !cell
+		!r1 = !t3.int()
+		!t4 = (!by + !o.yLen / 2 - !minY) / !cell
+		!r2 = !t4.int()
+		do !cc from !c1 to !c2
+			do !rr from !r1 to !r2
+				!gi = !rr * !cols + !cc + 1
+				!grid[$!gi].append(!i)
+			enddo
+		enddo
+	enddo
+	!moved = 0.0
+	!dirs = !this.BuildDirs()
+	!radii = object array()
+		!radii.append(9)
+		!radii.append(18)
+		!radii.append(27)
+		!radii.append(36)
+		!radii.append(45)
+	do !i from 1 to !n
+		!o = !list[$!i]
+		--查这个标注周围格子里的邻居
+		!near = object array()
+		!bx = !o.xPos + !o.xoff
+		!by = !o.yPos + !o.yoff
+		!t1 = (!bx - !o.xLen / 2 - !minX) / !cell
+		!c1 = !t1.int()
+		!t2 = (!bx + !o.xLen / 2 - !minX) / !cell
+		!c2 = !t2.int()
+		!t3 = (!by - !o.yLen / 2 - !minY) / !cell
+		!r1 = !t3.int()
+		!t4 = (!by + !o.yLen / 2 - !minY) / !cell
+		!r2 = !t4.int()
+		do !cc from !c1 to !c2
+			do !rr from !r1 to !r2
+				!gi = !rr * !cols + !cc + 1
+				!b = !grid[$!gi]
+				do !bi indices !b
+					!j = !b[$!bi]
+					if(!j ne !i)then
+						!near.append(!j)
+					endif
+				enddo
+			enddo
+		enddo
+		--当前有几个重叠
+		!curOv = 0
+		do !k indices !near
+			!q = !list[!near[$!k]]
+			!ddx = abs(!bx - !q.xPos - !q.xoff)
+			!ddy = abs(!by - !q.yPos - !q.yoff)
+			if(!ddx lt (!o.xLen + !q.xLen) / 2)then
+				if(!ddy lt (!o.yLen + !q.yLen) / 2)then
+					!curOv = !curOv + 1
+				endif
+			endif
+		enddo
+		if(!curOv gt 0)then
+			!bestC = -1.0
+			!bestX = 0
+			!bestY = 0
+			do !ri indices !radii
+				do !di indices !dirs
+					!nx = !radii[$!ri] * !dirs[$!di][1]
+					!ny = !radii[$!ri] * !dirs[$!di][2]
+					!px = !o.xPos + !nx
+					!py = !o.yPos + !ny
+					!inF = false
+					if(abs(!px - !this.frameCX) le !this.frameHX)then
+						if(abs(!py - !this.frameCY) le !this.frameHY)then
+							!inF = true
+						endif
+					endif
+					if(!inF)then
+						!ovN = 0
+						do !k indices !near
+							!q = !list[!near[$!k]]
+							!ddx = abs(!px - !q.xPos - !q.xoff)
+							!ddy = abs(!py - !q.yPos - !q.yoff)
+							if(!ddx lt (!o.xLen + !q.xLen) / 2)then
+								if(!ddy lt (!o.yLen + !q.yLen) / 2)then
+									!ovN = !ovN + 1
+								endif
+							endif
+						enddo
+						if(!ovN lt 1)then
+							!d = sqrt(!nx * !nx + !ny * !ny)
+							!c = !d * !this.distCost
+							!ghw = !o.xLen / 2 - !this.geomInset
+							!ghh = !o.yLen / 2 - !this.geomInset
+							if(!ghw lt 1)then
+								!ghw = 1
+							endif
+							if(!ghh lt 1)then
+								!ghh = 1
+							endif
+							!c = !c + !this.BoxHitPen(!px,!py,!ghw,!ghh)
+							if(!bestC lt 0)then
+								!bestC = !c
+								!bestX = !nx
+								!bestY = !ny
+							elseif(!c lt !bestC)then
+								!bestC = !c
+								!bestX = !nx
+								!bestY = !ny
+							endif
+						endif
+					endif
+				enddo
+			enddo
+			if(!bestC ge 0)then
+				!o.xoff = !bestX
+				!o.yoff = !bestY
+				!list[$!i] = !o
+				!moved = !moved + 1
+			endif
+		endif
+	enddo
+	return !moved
+endmethod
+define method .ShrinkPass(!list is array) is real
+	!n = !list.size()
+	!moved = 0.0
+	if(!n lt 1)then
+		return 0.0
+	endif
+	!gap = !this.greedyGap
+	do !i from 1 to !n
+		!me = !list[$!i]
+		!ax = !me.xoff
+		!ay = !me.yoff
+		if(abs(!ax) + abs(!ay) gt (!gap / 2))then
+			--只比 100mm 内的邻居，控制代价
+			!near = object array()
+			do !j from 1 to !n
+				if(!j ne !i)then
+					!ddx = !list[$!j].xPos - !me.xPos
+					!ddy = !list[$!j].yPos - !me.yPos
+					if(!ddx * !ddx + !ddy * !ddy lt 40000)then
+						!near.append(!j)
+					endif
+				endif
+			enddo
+			!curC = !this.LabelLocalCost(!list,!i,!ax,!ay,!near)
+			!bestC = !curC
+			!bestX = !ax
+			!bestY = !ay
+			!sx = 0
+			!sy = 0
+			if(!ax gt 0)then
+				!sx = -1
+			elseif(!ax lt 0)then
+				!sx = 1
+			endif
+			if(!ay gt 0)then
+				!sy = -1
+			elseif(!ay lt 0)then
+				!sy = 1
+			endif
+			--三个候选：只在 E 方向收、只在 N 方向收、两边都收
+			!cx1 = !ax + !sx * !gap
+			!cy1 = !ay
+			!cx2 = !ax
+			!cy2 = !ay + !sy * !gap
+			!cx3 = !ax + !sx * !gap
+			!cy3 = !ay + !sy * !gap
+			do !k from 1 to 3
+				!nx = !cx1
+				!ny = !cy1
+				if(!k eq 2)then
+					!nx = !cx2
+					!ny = !cy2
+				endif
+				if(!k eq 3)then
+					!nx = !cx3
+					!ny = !cy3
+				endif
+				!px = !me.xPos + !nx
+				!py = !me.yPos + !ny
+				!inF = false
+				if(abs(!px - !this.frameCX) le !this.frameHX)then
+					if(abs(!py - !this.frameCY) le !this.frameHY)then
+						!inF = true
+					endif
+				endif
+				if(!inF)then
+					!c = !this.LabelLocalCost(!list,!i,!nx,!ny,!near)
+					if(!c lt !bestC)then
+						!bestC = !c
+						!bestX = !nx
+						!bestY = !ny
+					endif
+				endif
+			enddo
+			if(!bestC lt !curC)then
+				!me.xoff = !bestX
+				!me.yoff = !bestY
+				!list[$!i] = !me
+				!moved = !moved + 1
+			endif
+		endif
+	enddo
+	return !moved
+endmethod
+define method .RepairPass(!list is array) is real
+	--【2026-11-01·性能】原来是 O(n²) 两两配对（标注一多就慢）。
+	--   现在先把每个标注框登记到 60mm 网格，只跟同格及相邻格里的标注比。
+	!moved = 0.0
+	!n = !list.size()
+	if(!n lt 2)then
+		return 0.0
+	endif
+	!cell = 60
+	--【2026-11-01】不用 1.0E10 这种字面量（PML 解析不稳）：直接用第一个标注的框当初值
+	!o0 = !list[1]
+	!minX = !o0.xPos + !o0.xoff - !o0.xLen / 2
+	!maxX = !o0.xPos + !o0.xoff + !o0.xLen / 2
+	!minY = !o0.yPos + !o0.yoff - !o0.yLen / 2
+	!maxY = !o0.yPos + !o0.yoff + !o0.yLen / 2
+	do !i from 1 to !n
+		!o = !list[$!i]
+		!bx = !o.xPos + !o.xoff
+		!by = !o.yPos + !o.yoff
+		!x1 = !bx - !o.xLen / 2
+		!x2 = !bx + !o.xLen / 2
+		!y1 = !by - !o.yLen / 2
+		!y2 = !by + !o.yLen / 2
+		if(!x1 lt !minX)then
+			!minX = !x1
+		endif
+		if(!x2 gt !maxX)then
+			!maxX = !x2
+		endif
+		if(!y1 lt !minY)then
+			!minY = !y1
+		endif
+		if(!y2 gt !maxY)then
+			!maxY = !y2
+		endif
+	enddo
+	!cf = (!maxX - !minX) / !cell
+	!cols = !cf.int() + 2
+	!rf = (!maxY - !minY) / !cell
+	!rows = !rf.int() + 2
+	!grid = object array()
+	do !g from 1 to (!cols * !rows)
+		!grid.append(object array())
+	enddo
+	do !i from 1 to !n
+		!o = !list[$!i]
+		!bx = !o.xPos + !o.xoff
+		!by = !o.yPos + !o.yoff
+		!t1 = (!bx - !o.xLen / 2 - !minX) / !cell
+		!c1 = !t1.int()
+		!t2 = (!bx + !o.xLen / 2 - !minX) / !cell
+		!c2 = !t2.int()
+		!t3 = (!by - !o.yLen / 2 - !minY) / !cell
+		!r1 = !t3.int()
+		!t4 = (!by + !o.yLen / 2 - !minY) / !cell
+		!r2 = !t4.int()
+		do !cc from !c1 to !c2
+			do !rr from !r1 to !r2
+				!gi = !rr * !cols + !cc + 1
+				!grid[$!gi].append(!i)
+			enddo
+		enddo
+	enddo
+	do !i from 1 to !n
+		!o = !list[$!i]
+		!bx = !o.xPos + !o.xoff
+		!by = !o.yPos + !o.yoff
+		!t1 = (!bx - !o.xLen / 2 - !minX) / !cell
+		!c1 = !t1.int()
+		!t2 = (!bx + !o.xLen / 2 - !minX) / !cell
+		!c2 = !t2.int()
+		!t3 = (!by - !o.yLen / 2 - !minY) / !cell
+		!r1 = !t3.int()
+		!t4 = (!by + !o.yLen / 2 - !minY) / !cell
+		!r2 = !t4.int()
+		do !cc from !c1 to !c2
+			do !rr from !r1 to !r2
+				!gi = !rr * !cols + !cc + 1
+				!b = !grid[$!gi]
+				!bn = !b.size()
+				do !bi from 1 to !bn
+					!j = !b[$!bi]
+					if(!j gt !i)then
+						!ob = !list[$!j]
+						!adx = abs(!bx - !ob.xPos - !ob.xoff)
+						!ady = abs(!by - !ob.yPos - !ob.yoff)
+						!hit = false
+						if(!adx lt (!o.xLen + !ob.xLen) / 2)then
+							if(!ady lt (!o.yLen + !ob.yLen) / 2)then
+								!hit = true
+							endif
+						endif
+						if(!hit)then
+							!ok = !this.TryRelocate(!list,!j)
+							if(!ok)then
+								!moved = !moved + 1
+							endif
+						endif
+					endif
+				enddo
+			enddo
+		enddo
+	enddo
+	return !moved
+endmethod
+--------------------------------------------------------------------------------------
+--【2026-10-31】退火运行记录：每次出图追加一行到 LayoutTool\macnneal.log，用来判断退火到底跑没跑、收了多少。
+---------------------------------------------------------------------------
+--【2026-11-01·诊断】把当前标注偏移的统计（最大 / 平均 / 超过 40mm 的个数）写进 zz_anneal.log，
+--   用来定位“哪个阶段把框拉远了”，而不是靠猜。
+define method .StatLog(!tag is string,!list is array)
+	var !mls EVAR PMLLIB
+	!root = !mls
+	!semi = !mls.match(';')
+	if(!semi gt 0)then
+		!root = !mls.before(';')
+	endif
+	!path = !root & 'LayoutTool\mac\zz_anneal.log'
+	!n = !list.size()
+	!maxD = 0.0
+	!sumD = 0.0
+	!over40 = 0.0
+	do !i from 1 to !n
+		!o = !list[$!i]
+		!d = sqrt(!o.xoff * !o.xoff + !o.yoff * !o.yoff)
+		!sumD = !sumD + !d
+		if(!d gt !maxD)then
+			!maxD = !d
+		endif
+		if(!d gt 40)then
+			!over40 = !over40 + 1
+		endif
+	enddo
+	!meanD = 0.0
+	if(!n gt 0)then
+		!meanD = !sumD / !n
+	endif
+	!line = object array()
+	!line.append('STAT ' & !tag & ' n=' & !n.string('D0') & ' max=' & !maxD.string('D1') & ' mean=' & !meanD.string('D1') & ' over40=' & !over40.string('D0'))
+	!f = object FILE(!path)
+	!f.writeFile('APPEND', !line)
+endmethod
+define method .AnnealLog(!hot is real,!accepted is real,!budget is real)
+	var !mls EVAR PMLLIB
+	!root = !mls
+	!semi = !mls.match(';')
+	if(!semi gt 0)then
+		!root = !mls.before(';')
+	endif
+	!path = !root & 'LayoutTool\mac\zz_anneal.log'
+	!line = object array()
+	!line.append('hot=' & !hot.string() & ' iter=' & !budget.string() & ' accepted=' & !accepted.string())
+	!f = object FILE(!path)
+	!f.writeFile('APPEND', !line)
+endmethod
+--------------------------------------------------------------------------------------
+--【2026-10-31·方案A】建图面几何障碍表：管线中线（TUBI）+ 设备轮廓（EQUI），
+--   统一换算成**图面毫米**后存进一个 100mm 粗网格，供代价函数快速查询。
+--   坐标变换（实测校过，/001/S/V）：
+--     drawing = model × vscale + (view.xypos - view.size/2 - volume.from × vscale)
+define method .BuildObstacles()
+	!view = !this.view
+	!this.obsReady = false
+	if(!view.unset())then
+		return
+	endif
+	!ldg = object LimitDbelementGet()
+	!ldg.view = !view
+	!vol = !ldg.GetVolume()
+	!sc = !view.vscale
+	!ce = !view.xypos.east - !view.size[1] / 2 - !vol.from.east * !sc
+	!cn = !view.xypos.north - !view.size[2] / 2 - !vol.from.north * !sc
+	!this.obsLimE1 = !vol.from.east
+	!this.obsLimE2 = !vol.to.east
+	!this.obsLimN1 = !vol.from.north
+	!this.obsLimN2 = !vol.to.north
+	!this.obsScale = !sc
+	!this.obsCE = !ce
+	!this.obsCN = !cn
+	!cell = 50
+	!this.obsCell = !cell
+	!this.obsMinX = !view.xypos.east - !view.size[1] / 2
+	!this.obsMinY = !view.xypos.north - !view.size[2] / 2
+	!colsF = !view.size[1] / !cell
+	!rowsF = !view.size[2] / !cell
+	!cols = 1 + !colsF.int()
+	!rows = 1 + !rowsF.int()
+	!this.obsCols = !cols
+	!this.obsRows = !rows
+	!this.obsSegs = object array()
+	!grid = object array()
+	do !i from 1 to (!cols * !rows)
+		!grid.append(object array())
+	enddo
+	!this.obsGrid = !grid
+	!this.obsRects = object array()
+	!rgrid = object array()
+	do !i from 1 to (!cols * !rows)
+		!rgrid.append(object array())
+	enddo
+	!this.obsRectGrid = !rgrid
+	--① 管线中线
+	!tubi = !ldg.GetDrawListElement('TUBI')
+	do !i indices !tubi
+		!a = !tubi[$!i].apos
+		!b = !tubi[$!i].lpos
+		!x1 = !a.east * !sc + !ce
+		!y1 = !a.north * !sc + !cn
+		!x2 = !b.east * !sc + !ce
+		!y2 = !b.north * !sc + !cn
+		!this.AddObstacle(!x1,!y1,!x2,!y2,3,!this.penGeomPipe)
+	enddo
+	--② 设备轮廓（四条边）
+	--【2026-10-31·按你的要求】设备：取**EQUI 包围盒 ∩ 视图范围**，
+	--   只避开实际画在图上的那一块；交集为空的设备直接跳过。
+	--【2026-11-01·按你的要求·回退为性能】设备取数回到 GetDrawListElement('EQUI')：
+	--   EquisFromView() 要逐个 ADDE scope 跑 coll all equi，场景大时慢；局部指标上
+	--   整体包围盒 × equiShrink 已经够用。
+	!equis = !ldg.GetDrawListElement('EQUI')
+	do !i indices !equis
+		--【2026-10-31·按你的要求】设备不再用“整体包围盒 × 比例”，而是**取它里面各个基本体的包围盒集合**；
+		--   一个基本体一个矩形，比一个大盒子贴合得多（平台/梯子不会拊进来）。
+		--   取不到基本体（老模型、异形体）时才回退到整体包围盒。
+		!ev = object volume(!equis[$!i])
+		--【2026-10-31】设备取包围盒 ∩ 视图范围；再按 equiShrink 收一圈。
+		--   （primitive 级别的包围盒在 Draft 环境里取不到：coll all 要求 CE 是设计元素，
+		--    而 Draft 里 CE 只能是图纸元素；详见 change_log 2026-11-01。）
+		!shE1 = !ev.from.east
+		!shE2 = !ev.to.east
+		!shN1 = !ev.from.north
+		!shN2 = !ev.to.north
+		!dshE = (!shE2 - !shE1) * (1 - !this.equiShrink) / 2
+		!dshN = (!shN2 - !shN1) * (1 - !this.equiShrink) / 2
+		!this.AddBoxObstacle(!shE1 + !dshE,!shN1 + !dshN,!shE2 - !dshE,!shN2 - !dshN,4,!this.penGeomEqui)
+	enddo
+	--③ 仪表符号（INST）：包围盒四边，惩罚高于管线
+	!insts = !ldg.GetDrawListElement('INST')
+	do !i indices !insts
+		!iv = object volume(!insts[$!i])
+		!this.AddBoxObstacle(!iv.from.east,!iv.from.north,!iv.to.east,!iv.to.north,2,!this.penGeomInst)
+	enddo
+	--④ 阀门符号（VALV）：同上
+	!valvs = !ldg.GetDrawListElement('VALV')
+	do !i indices !valvs
+		!wv = object volume(!valvs[$!i])
+		!this.AddBoxObstacle(!wv.from.east,!wv.from.north,!wv.to.east,!wv.to.north,2,!this.penGeomValv)
+	enddo
+	--【2026-10-31·按你的要求】管件也要避开：ELBO(弯头) / PCOM / TEE(三通) / REDU(异径) / FILT(过滤器)，
+	--   与 VALV 同一套取法（包围盒四边）和同一级别的惩罚。
+	!fitTypes = object array()
+	!fitTypes[1] = 'ELBO'
+	!fitTypes[2] = 'PCOM'
+	!fitTypes[3] = 'TEE'
+	!fitTypes[4] = 'REDU'
+	!fitTypes[5] = 'FILT'
+	do !fk indices !fitTypes
+		!fits = !ldg.GetDrawListElement(!fitTypes[$!fk])
+		do !i indices !fits
+			!fv = object volume(!fits[$!i])
+			!this.AddBoxObstacle(!fv.from.east,!fv.from.north,!fv.to.east,!fv.to.north,2,!this.penGeomValv)
+		enddo
+	enddo
+	!this.obsReady = true
+endmethod
+--------------------------------------------------------------------------------------
+--【2026-10-31·方案A】把一条线段写进障碍表与网格
+---------------------------------------------------------------------------
+--【2026-10-31·按你的要求】以**模型坐标矩形**为障碍：先与视图范围求交集，
+--   交集为空就不记（这就是“设备只进来一部分”的处理），然后再换算成图面 mm。
+--   为什么不直接用 EQUI 包围盒：设备只被切进来一角时，整个盒子会把大片未画的区域也当成障碍。
+define method .AddBoxObstacle(!e1 is real,!n1 is real,!e2 is real,!n2 is real,!r is real,!pen is real)
+	!ae1 = !e1
+	!ae2 = !e2
+	!an1 = !n1
+	!an2 = !n2
+	if(!ae1 lt !this.obsLimE1)then
+		!ae1 = !this.obsLimE1
+	endif
+	if(!ae2 gt !this.obsLimE2)then
+		!ae2 = !this.obsLimE2
+	endif
+	if(!an1 lt !this.obsLimN1)then
+		!an1 = !this.obsLimN1
+	endif
+	if(!an2 gt !this.obsLimN2)then
+		!an2 = !this.obsLimN2
+	endif
+	if(!ae2 le !ae1)then
+		return
+	endif
+	if(!an2 le !an1)then
+		return
+	endif
+	!sc = !this.obsScale
+	!ce = !this.obsCE
+	!cn = !this.obsCN
+	!x1 = !ae1 * !sc + !ce
+	!x2 = !ae2 * !sc + !ce
+	!y1 = !an1 * !sc + !cn
+	!y2 = !an2 * !sc + !cn
+	!this.AddRect(!x1 - !r,!y1 - !r,!x2 + !r,!y2 + !r,!pen)
+endmethod
+---------------------------------------------------------------------------
+--【2026-10-31】实心矩形障碍（图面 mm）：存进 obsRects，并按 50mm 网格登记
+define method .AddRect(!x1 is real,!y1 is real,!x2 is real,!y2 is real,!pen is real)
+	!rect = object array()
+	!rect[1] = !x1
+	!rect[2] = !y1
+	!rect[3] = !x2
+	!rect[4] = !y2
+	!rect[5] = !pen
+	!this.obsRects.append(!rect)
+	!idx = !this.obsRects.size()
+	!cell = !this.obsCell
+	!tx1 = (!x1 - !this.obsMinX) / !cell
+	!tx2 = (!x2 - !this.obsMinX) / !cell
+	!ty1 = (!y1 - !this.obsMinY) / !cell
+	!ty2 = (!y2 - !this.obsMinY) / !cell
+	!c1 = !tx1.int()
+	!c2 = !tx2.int()
+	!r1 = !ty1.int()
+	!r2 = !ty2.int()
+	if(!c1 lt 0)then
+		!c1 = 0
+	endif
+	if(!r1 lt 0)then
+		!r1 = 0
+	endif
+	if(!c2 gt (!this.obsCols - 1))then
+		!c2 = !this.obsCols - 1
+	endif
+	if(!r2 gt (!this.obsRows - 1))then
+		!r2 = !this.obsRows - 1
+	endif
+	do !cc from !c1 to !c2
+		do !rr from !r1 to !r2
+			!gi = !rr * !this.obsCols + !cc + 1
+			!this.obsRectGrid[$!gi].append(!idx)
+		enddo
+	enddo
+endmethod
+define method .AddObstacle(!x1 is real,!y1 is real,!x2 is real,!y2 is real,!r is real,!pen is real)
+	!seg = object array()
+	!seg[1] = !x1
+	!seg[2] = !y1
+	!seg[3] = !x2
+	!seg[4] = !y2
+	!seg[5] = !r
+	!seg[6] = !pen
+	--【2026-10-31·性能】预存包围盒：查询时只需 4 次比较
+	!seg[7] = !x1
+	!seg[8] = !y1
+	!seg[9] = !x2
+	!seg[10] = !y2
+	if(!x2 lt !x1)then
+		!seg[7] = !x2
+		!seg[9] = !x1
+	endif
+	if(!y2 lt !y1)then
+		!seg[8] = !y2
+		!seg[10] = !y1
+	endif
+	!this.obsSegs.append(!seg)
+	!idx = !this.obsSegs.size()
+	-- 网格覆盖范围（外扩 r）
+	!cell = !this.obsCell
+	--【2026-10-31 修正】括号表达式不能直接挂 .int()（E-12）
+	!tx1 = (!x1 - !this.obsMinX) / !cell
+	!tx2 = (!x2 - !this.obsMinX) / !cell
+	!ty1 = (!y1 - !this.obsMinY) / !cell
+	!ty2 = (!y2 - !this.obsMinY) / !cell
+	!c1 = !tx1.int() - 1
+	!c2 = !tx2.int() + 1
+	!r1 = !ty1.int() - 1
+	!r2 = !ty2.int() + 1
+	if(!c1 gt !c2)then
+		!t = !c1
+		!c1 = !c2
+		!c2 = !t
+	endif
+	if(!r1 gt !r2)then
+		!t = !r1
+		!r1 = !r2
+		!r2 = !t
+	endif
+	if(!c1 lt 0)then
+		!c1 = 0
+	endif
+	if(!r1 lt 0)then
+		!r1 = 0
+	endif
+	if(!c2 gt (!this.obsCols - 1))then
+		!c2 = !this.obsCols - 1
+	endif
+	if(!r2 gt (!this.obsRows - 1))then
+		!r2 = !this.obsRows - 1
+	endif
+	do !cc from !c1 to !c2
+		do !rr from !r1 to !r2
+			!gi = !rr * !this.obsCols + !cc + 1
+			!this.obsGrid[$!gi].append(!idx)
+		enddo
+	enddo
+endmethod
+--------------------------------------------------------------------------------------
+--【2026-10-31·方案A】标注框（中心 + 半宽高）是否压到图面几何
+define method .BoxHitPen(!cx is real,!cy is real,!hw is real,!hh is real) is real
+	--【2026-10-31·性能】用**包围盒相交**判断（每段 4 次比较）。
+	--   为什么不做精确的线段-矩形相交：那版代码嵌套太深，PML 编译不过（报
+	--   `(module 0, message 0)` 空壳错误）。包围盒判法会对斜线略宽松，但标注避让本来就不需要精确到 1mm。
+	!hit = 0.0
+	if(!this.obsReady)then
+		!cell = !this.obsCell
+		!qtx1 = (!cx - !hw - !this.obsMinX) / !cell
+		!qtx2 = (!cx + !hw - !this.obsMinX) / !cell
+		!qty1 = (!cy - !hh - !this.obsMinY) / !cell
+		!qty2 = (!cy + !hh - !this.obsMinY) / !cell
+		!c1 = !qtx1.int()
+		!c2 = !qtx2.int()
+		!r1 = !qty1.int()
+		!r2 = !qty2.int()
+		if(!c1 lt 0)then
+			!c1 = 0
+		endif
+		if(!r1 lt 0)then
+			!r1 = 0
+		endif
+		if(!c2 gt (!this.obsCols - 1))then
+			!c2 = !this.obsCols - 1
+		endif
+		if(!r2 gt (!this.obsRows - 1))then
+			!r2 = !this.obsRows - 1
+		endif
+		!bx1 = !cx - !hw
+		!bx2 = !cx + !hw
+		!by1 = !cy - !hh
+		!by2 = !cy + !hh
+		--【2026-10-31·按你的要求】先查**实心矩形**（设备/仪表/阀门/管件）。
+		--   原来只判四条边，标注落在大设备内部时一直返回 0，所以会“点在罐体里”。
+		do !cc from !c1 to !c2
+			do !rr from !r1 to !r2
+				!gi = !rr * !this.obsCols + !cc + 1
+				!rb = !this.obsRectGrid[$!gi]
+				!rn = !rb.size()
+				do !bi from 1 to !rn
+					!rc = !this.obsRects[!rb[$!bi]]
+					if(!rc[1] lt !bx2)then
+						if(!rc[3] gt !bx1)then
+							if(!rc[2] lt !by2)then
+								if(!rc[4] gt !by1)then
+									!hit = !rc[5]
+								endif
+							endif
+						endif
+					endif
+				enddo
+			enddo
+		enddo
+		do !cc from !c1 to !c2
+			do !rr from !r1 to !r2
+				!gi = !rr * !this.obsCols + !cc + 1
+				!bucket = !this.obsGrid[$!gi]
+				!bn = !bucket.size()
+				do !bi from 1 to !bn
+					!seg = !this.obsSegs[!bucket[$!bi]]
+					!sr = !seg[5]
+					if(!seg[9] + !sr gt !bx1)then
+						if(!seg[7] - !sr lt !bx2)then
+							if(!seg[10] + !sr gt !by1)then
+								if(!seg[8] - !sr lt !by2)then
+									!hit = !seg[6]
+								endif
+							endif
+						endif
+					endif
+				enddo
+			enddo
+		enddo
+	endif
+	return !hit
+endmethod
