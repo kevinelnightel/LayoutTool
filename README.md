@@ -135,22 +135,6 @@ function/   预留
 
 ---
 
-## 发布（一键推送）
-
-仓库：<https://github.com/kevinelnightel/LayoutTool>
-
-```bat
-publish.bat                :: 时间戳做提交信息，然后推送
-publish.bat -f             :: 用 publish.msg 里的提交信息（支持中文）
-publish.bat "add feature"  :: 用命令行给的提交信息（ASCII）
-publish.bat --check        :: 只跑隐私检查，不提交不推送
-```
-
-提交前会扫描受版本控制的文本文件，发现**用户目录路径 / 邮箱域名 / 账号**就中止，避免把私人信息推到公开仓库。
-提交人邮箱固定为 `kevinelnightel@users.noreply.github.com`（noreply），不暴露真实邮箱。
-
----
-
 ## 已知限制
 
 | 项目 | 现状 | 原因 |

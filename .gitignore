@@ -20,7 +20,3 @@ dxf_fix_req.txt
 # 系统
 Thumbs.db
 desktop.ini
-publish.msg
-
-# 本地隐私匹配词（含真实姓名/邮箱，不入库）
-privacy_patterns.txt
