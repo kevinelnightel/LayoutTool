@@ -1,0 +1,82 @@
+LayoutTool License
+==================
+
+Copyright (c) 2026 kevinelnightel
+
+Project : LayoutTool - automated 2D drafting plugin for AVEVA PDMS 12.1.SP4
+Repo    : https://github.com/kevinelnightel/LayoutTool
+
+--------------------------------------------------------------------------------
+1. GRANT OF RIGHTS
+--------------------------------------------------------------------------------
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so - including for commercial purposes - subject to the conditions below.
+
+--------------------------------------------------------------------------------
+2. CONDITIONS
+--------------------------------------------------------------------------------
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+No royalty, fee or further permission from the author is required for any of
+the rights granted above.
+
+--------------------------------------------------------------------------------
+3. INTENT OF THE AUTHOR  (a statement of intent; it does not limit Section 1)
+--------------------------------------------------------------------------------
+
+This Software was written, and is published, for the purpose of learning and
+researching how the PML language is used inside AVEVA PDMS: PML 1 / PML 2
+syntax, objects (.pmlobj), forms (.pmlfrm), macros (.mac) and the DABACON data
+model.
+
+The author does NOT endorse, encourage, recommend or support commercial use of
+this Software. Anyone - any person or any company - who uses this Software, in
+whole or in part, for commercial, production or project-delivery purposes does
+so entirely on their own initiative, on their own judgement and at their own
+risk. Such use creates no relationship, obligation, warranty or liability
+between the user and the author.
+
+--------------------------------------------------------------------------------
+4. NO WARRANTY
+--------------------------------------------------------------------------------
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, TITLE AND NONINFRINGEMENT. THERE IS NO
+WARRANTY THAT THE SOFTWARE WILL PRODUCE CORRECT DRAWINGS, CORRECT TABLES OR
+CORRECT DXF FILES FOR ANY PARTICULAR PROJECT.
+
+--------------------------------------------------------------------------------
+5. LIMITATION OF LIABILITY
+--------------------------------------------------------------------------------
+
+IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Any risk arising from the use of this Software by any person or any company -
+including but not limited to loss of data, drawing or material-take-off errors,
+design errors, construction or safety consequences, project delay, rework or
+any commercial loss - is borne solely by the party that used the Software and
+has nothing to do with the author.
+
+--------------------------------------------------------------------------------
+6. 中文说明（方便阅读；如有歧义，以以上英文条款为准）
+--------------------------------------------------------------------------------
+
+1) 可以任意使用：免费、无需额外授权，可复制、修改、合并、发布、再许可、销售。
+2) 也可以随意商用：本许可不对商业用途设限，不需要另行取得作者同意。
+   但作者不赞成、不鼓励、不推荐、不背书把本插件用于商业用途。
+3) 本插件仅用于学习和研究 PML 语法在 AVEVA PDMS 中的使用。
+4) 任何人或任何公司自行决定将其用于商业、生产或项目交付，属其自主行为；
+   由此可能造成的任何风险（数据丢失、图纸与材料表错误、设计错误、施工与安全后果、
+   工期延误、返工、商业损失等）与作者本人无关，作者不承担任何责任。
+5) 本软件按"现状"提供，不附带任何明示或默示的担保。
