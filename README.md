@@ -56,7 +56,7 @@ function/   预留
    pml reload form !!LayoutToolMain
    ```
 
-   ���次改动 `.pmlobj` 后：
+   每次改动 `.pmlobj` 后：
 
    ```pml
    pml reload object labelgenerator
@@ -95,11 +95,17 @@ function/   预留
 
 **障碍建模**（`BuildObstacles`，50 mm 网格索引）：
 
+**取数**：`LimitDbelementGet.GetDrawListElement` 对每条 ADDE 用
+`COLL ALL (类型) WITHIN 视图范围 FOR <ADDE 条目>` 查询 —— 展开在数据库端就按范围剪枝，
+不会先把容器整展开、再拿 PML 求交（那是 O(n×m)，图大时会卡死）。
+
 | 对象 | 取法 | 惩罚 |
 |---|---|---|
-| 管线 TUBI | 中线线段，半宽 3 mm | 20 000 |
-| 设备 EQUI | `volume` 包围盒 × 0.85，再与 LIMITS 求交 | 6 000 |
-| 仪表 / 阀门 / 管件 | 包围盒 ∩ LIMITS → 实心矩形 | 30 000 |
+| 管线 TUBI | `volume` 包围盒（外扩 1 mm），与 LIMITS 求交 | 20 000 |
+| 仪表 / 阀门 / 三通 / 弯头（INST / VALV / PCOM / TEE / ELBO） | `volume` 包围盒 ∩ LIMITS → 实心矩形 | 30 000 |
+
+> 障碍类型按需精简（`BuildObstacles` 里的 `fitTypes` 决定管件做哪几类）；设备 EQUI 目前不建框。
+> TUBI 若嫌 `volume()` 贵，可退回「两点 + 半宽」的中线写法（老版本做法，标注避让会薄一点）。
 
 **定位**：按框面积从大到小贪心，每个标注试 12 方向 × 4 圈（步长 9 mm），取代价最低者；
 再用 `OverlapFixPass` 处理真正重叠的标注，取「零重叠 + 代价最低」，跑 2 轮。
@@ -113,7 +119,7 @@ function/   预留
 | `distCost` | 24 | 每 mm 距离代价 |
 | `greedyTier` / `greedyGap` | 4 / 9 mm | 候选圈数与步长 |
 | `equiShrink` | 0.85 | 设备包围盒收缩 |
-| `penGeomInst` / `penGeomValve` | 30 000 | 仪表 / 阀门 / 管件优先级 |
+| `penGeomInst` / `penGeomValv` | 30 000 | 仪表 / 阀门 / 管件优先级 |
 | `penGeomPipe` | 20 000 | 管线 |
 | `penGeomEqui` | 6 000 | 设备 |
 
@@ -155,6 +161,7 @@ function/   预留
 3. `if(!x)` 在 PML 里表示「x 为真」，取反要用 `.not()`。
 4. 字符串只能单引号，拼接只能 `&`。
 5. 打进 exe 的脚本读「与自己同目录」的文件，要用 `sys.executable` 而不是 `__file__`。
+6. **`FILE` 单条记录约 1 KB**：一行拼几十个中文元素名会超限，报 `(41,319) ... RSE`，文件只留 3 字节 BOM 且被句柄锁住；长列表要拆成「每项一条记录」再在读取端归并。
 
 ---
 
