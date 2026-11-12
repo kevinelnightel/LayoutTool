@@ -33,6 +33,7 @@ define method .GenerateXmlFile(!drawlist is array,!removelist is array,!viewConf
 	--保存ViewConfigList
 	!message = '<ViewConfigList>'
 	!fileMessage.append(!message)
+	!entryLines = object array()
 	if(!viewConfigList.size() ne 0)then
 		do !ptrviewConfigList indices !viewConfigList
 			!viewName			=		'<ViewName>'			+	!viewConfigList[$!ptrviewConfigList].viewName
@@ -86,17 +87,28 @@ define method .GenerateXmlFile(!drawlist is array,!removelist is array,!viewConf
 	endif
 	!viewRelativeEL	= '<ViewRelativeEL>' + !relText
 
-			!message			=		'	' + !viewName + !viewLimitFrom + !viewLimitTo + !viewPositionX + !viewPositionY + !viewDirection + !viewScale + !viewType + !viewGrid + !viewDrawList + !viewRemoveList + !viewLayoutKind + !viewRelativeEL
+			!message			=		'	' + !viewName + !viewLimitFrom + !viewLimitTo + !viewPositionX + !viewPositionY + !viewDirection + !viewScale + !viewType + !viewGrid + !viewLayoutKind + !viewRelativeEL
 			!fileMessage.append(!message)
+			!dlEachName = !viewConfigList[$!ptrviewConfigList].viewName
+			do !pDlEach indices !dl
+				!entryLines.append('<ViewDL>' & !dlEachName & '|' & !dl[$!pDlEach])
+			enddo
+			do !pRlEach indices !rl
+				!entryLines.append('<ViewRL>' & !dlEachName & '|' & !rl[$!pRlEach])
+			enddo
 		enddo
 	endif
 	
 	!message = '<EndViewConfigList>'
-	!fileMessage.append(!message)
+		!fileMessage.append(!message)
+	do !pEntryLine indices !entryLines
+		!fileMessage.append(!entryLines[$!pEntryLine])
+	enddo
 	--结束保存ViewConfigList
 
 	!file = object file(!filePath)
 	!file.Writefile('overwrite',!fileMessage)
+	!file.close()
 endmethod
 --------------------------------------------------------------------------------------
 define method .LoadXmlFile(!filePath is string) is array
@@ -113,6 +125,22 @@ define method .LoadXmlFile(!filePath is string) is array
 		return
 	endif
 	!fileMessage = !file.ReadFile()
+	-- FIX 2026-11-10: view-level DrawList/RemoveList are one record per item now.
+	-- PDMS FILE has a ~1KB single-record limit; exceeding it gives (41,319) RSE.
+	!dlEntryNames = object array()
+	!dlEntryItems = object array()
+	!rlEntryNames = object array()
+	!rlEntryItems = object array()
+	do !pEntry indices !fileMessage
+		!mLine = !fileMessage[$!pEntry]
+		if(!mLine.matchwild('<ViewDL>*'))then
+				!dlEntryNames.append(!mLine.after('<ViewDL>').before('|'))
+				!dlEntryItems.append(!mLine.after('|'))
+		elseif(!mLine.matchwild('<ViewRL>*'))then
+				!rlEntryNames.append(!mLine.after('<ViewRL>').before('|'))
+				!rlEntryItems.append(!mLine.after('|'))
+		endif
+	enddo
 	do !ptrFileMessage indices !fileMessage
 		if(!fileMessage[$!ptrFileMessage] eq '<DrawList>')then
 			!drawlistStartLineNo = !ptrFileMessage + 1
@@ -208,6 +236,29 @@ define method .LoadXmlFile(!filePath is string) is array
 				endif
 			else
 				!viewConfig.viewGrid	=	!lkLine.after('<viewGird>')
+			endif
+			-- FIX 2026-11-10: fold <ViewDL>/<ViewRL> records back by viewName.
+			if(!dlEntryNames.size() gt 0)then
+				!arrDl = object array()
+				do !pD indices !dlEntryNames
+					if(!dlEntryNames[$!pD] eq !viewConfig.viewName)then
+						!arrDl.append(!dlEntryItems[$!pD])
+					endif
+				enddo
+				if(!arrDl.size() gt 0)then
+					!viewConfig.drawlist = !arrDl
+				endif
+			endif
+			if(!rlEntryNames.size() gt 0)then
+				!arrRl = object array()
+				do !pR indices !rlEntryNames
+					if(!rlEntryNames[$!pR] eq !viewConfig.viewName)then
+						!arrRl.append(!rlEntryItems[$!pR])
+					endif
+				enddo
+				if(!arrRl.size() gt 0)then
+					!viewConfig.removelist = !arrRl
+				endif
 			endif
 			!viewconfigArray.append(!viewConfig)
 		enddo

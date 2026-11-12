@@ -353,6 +353,13 @@ define method .Generate() is string
 			!this.DrawAngleFan(!nozzArr)
 		endif
 		!nozzCount = !nozzCount + !nozzArr.size()
+		--【修正·2026-11-11】立式/卧式方位图：一张图只做一台设备。
+		--   视图 ADDE 放区域时会带出多台设备，老逻辑对每台都跑一遍整流程：
+		--   立式 → VNOTE 重名 (41,12) Name ... already used；
+		--   卧式 → 每台设备各画 4 条尺寸链，图面出现"很多个"标注。
+		if(!wantOrie.unset().not())then
+			break
+		endif
 	enddo
 	-- 输出统计，供界面提示（筛掉了多少台 / 有几台判不出方位）
 	!this.equiCount = !equiUsed
@@ -507,6 +514,19 @@ endhandle
 	MSTYLE Off
 	MCOLOUR 2
 	!noteName = !view.name + '-anglenote'
+	--【修正·2026-11-11】重复点"生成"时上一次的 VNOTE 还在 → name 报 (41,12)。
+	--   先删同名旧锚点再建；删完把 CE 切回 view，保证 NEW VNOTE 挂在正确父级。
+	!oldOk = true
+	!oldNote = object DBREF()
+	!oldNote = !noteName.dbref()
+	handle any
+		!oldOk = false
+	endhandle
+	if(!oldOk)then
+		$!oldNote
+		DELETE VNOTE
+		!!ce = !view
+	endif
 	name $!noteName
 	--【本次新增·按你的要求】先画**设备本身的东西南北中心线**（方位角 0 / 90 / 180 / 270），并各自标注角度。
 	--   复用 DrawAngleLine：它从当前锚点（= 设备中心）沿给定方位角画一条线、并在线端标角度，

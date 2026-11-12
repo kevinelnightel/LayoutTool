@@ -21,64 +21,83 @@ endmethod
 define method .GetDrawListElement(!type is string) is array
 	!view = !this.view
 	!result = object array()
-	!collect = object collect()
-	!collect.volume = !this.GetVolume()
-	!collect.types = !type
-	!volueDbelementList = !!collect(!collect)
-	
-	--获取范围内的所有指定类型对象
-	!addeCollection = object collection()
-	!remeCollection = object collection()
-	!addeCollection.addtype(!type)
-	!remeCollection.addtype(!type)
-	
+	!vol = !this.GetVolume()
+	--【A·2026-11-10】逐条 ADDE 带 WITHIN 范围查：数据库展开时就按视图范围剪枝
+	--   （命令 COLL ALL (类型) WITHIN from TO to FOR <条目>，见 limbo\functions\collect.pmlfnc）
+	--   原来先把 ADDE 容器整个展开、再和范围内元素求交：范围小、容器大时白展开上万条。
+	--   dbref 解析不出的条目退回 addscope 展开（只影响那几条）。
+	!addeList = object array()
 	!nRemeMembers = 0
+	!nFallback = 0
+	!fallbackColl = object collection()
+	!fallbackColl.addtype(!type)
 	!drawListMembers = !view.Idlname.members
 	do !ptrDrawListMembers indices !drawListMembers
-		if(!drawListMembers[$!ptrDrawListMembers].type eq 'ADDE')then
-			!addeCollection.addscope(!drawListMembers[$!ptrDrawListMembers].Idname)
-		elseif(!drawListMembers[$!ptrDrawListMembers].type eq 'REME')then
-			!nRemeMembers = !nRemeMembers + 1
-			!remeCollection.addscope(!drawListMembers[$!ptrDrawListMembers].Idname)
+		!mType = !drawListMembers[$!ptrDrawListMembers].type
+		!mName = !drawListMembers[$!ptrDrawListMembers].Idname
+		if(!mType eq 'ADDE' or !mType eq 'REME')then
+			!gotDr = false
+			!srch = object DBREF()
+			!srch = !mName
+			!gotDr = true
+			handle any
+				!gotDr = false
+			endhandle
+			if(!mType eq 'REME')then
+				!nRemeMembers = !nRemeMembers + 1
+			endif
+			if(!gotDr)then
+				!cOne = object collect()
+				!cOne.volume = !vol
+				!cOne.types = !type
+				!cOne.search = !srch
+				!part = !!collect(!cOne)
+				if(!mType eq 'ADDE')then
+					do !pp indices !part
+						!addeList.append(!part[$!pp])
+					enddo
+				else
+					do !pq indices !part
+						!jj = !addeList.FindFirst(!part[$!pq])
+						if(!jj.unset().not())then
+						!addeList.DeleteFrom(!jj,1)
+						endif
+					enddo
+					!addeList.Compress()
+				endif
+			elseif(!mType eq 'ADDE')then
+				!nFallback = !nFallback + 1
+				!fallbackColl.addscope(!mName)
+			endif
 		endif
 	enddo
-	
-	!addeList = !addeCollection.results()
-	!remeList = !remeCollection.results()
-	
-	do !ptrRemeList indices !remeList
-		!i = !addeList.FindFirst(!remeList[$!ptrRemeList])
-		if(!i.unset().not())then
-			!addeList.DeleteFrom(!i,1)
-		endif
-	enddo
-	!addeList.Compress()
-	
-	do !ptrVolueDbelementList indices !volueDbelementList
-		!j = !addeList.FindFirst(!volueDbelementList[$!ptrVolueDbelementList])
-		if(!j.unset().not())then
-			!result.append(!addeList[$!j])
-		endif
-	enddo
-	!result.unique()
-	
-	--【E3D 兼容·2026-09-14】E3D 下 `collection.results()` 与 `!!collect()` 的元素表示不一致，
-	--  上面的求交会全部落空（图面正常、但标注/尺寸/表格全空）。此时若视图范围内确有该类型元素，
-	--  就直接用这些元素。若 DrawList 带 REME 排除项则打印提示（排除项不生效，宁可多标不漏标）。
-	!nMatched = !result.size()
-	!nVolume = !volueDbelementList.size()
-	if(!nMatched lt 1 and !nVolume gt 0)then
-		if(!nRemeMembers gt 0)then
-			$p DrawList/volume intersection empty - using view-volume elements (REME exclusions NOT applied):
-			$p $!type
-		endif
-		!result = object array()
-		do !ptrVolue indices !volueDbelementList
-			!result.append(!volueDbelementList[$!ptrVolue])
+	-- 解析不出 dbref 的 ADDE 条目：退回老办法展开（数量少，代价可控）
+	if(!nFallback gt 0)then
+		!fbList = !fallbackColl.results()
+		do !pf indices !fbList
+			!addeList.append(!fbList[$!pf])
 		enddo
-		!result.unique()
 	endif
-	return !result	
+	!addeList.unique()
+	-- 一条都没匹配到时，退回「视图范围内全部」（E3D 兼容，与原逻辑一致）
+	if(!addeList.size() lt 1)then
+		!collect = object collect()
+		!collect.volume = !vol
+		!collect.types = !type
+		!volueDbelementList = !!collect(!collect)
+		if(!volueDbelementList.size() gt 0)then
+			if(!nRemeMembers gt 0)then
+				$p DrawList/volume intersection empty - using view-volume elements (REME exclusions NOT applied):
+				$p $!type
+			endif
+			do !pv indices !volueDbelementList
+				!addeList.append(!volueDbelementList[$!pv])
+			enddo
+			!addeList.unique()
+		endif
+	endif
+	!result = !addeList
+	return !result
 endmethod
 --------------------------------------------------------------------------------------
 --用来判断某点是否在某范围内

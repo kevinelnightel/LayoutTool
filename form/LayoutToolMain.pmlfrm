@@ -1005,7 +1005,7 @@ define method .MethodPickLimit()
   enddo
   
   !!edgPosCntrl.setPick(7)
-  !!edgPosCntrl.setPickType(1)
+  --!!edgPosCntrl.setPickType(1)
   !!edgCntrl.add(!packet)
 endmethod
 ---------------------------------------------------------------------------
@@ -1398,7 +1398,7 @@ endmethod
 --添加drawlist
 define method .MethodAddDrawListMember()
 	!type = !!ce.type
-	if(!type ne 'GPWL' and !type ne 'GPSET' and !type ne 'SITE' and !type ne 'ZONE' and !type ne 'PIPE' and !type ne 'EQUI' and !type ne 'STRU' and !type ne 'HVAC' and !type ne 'REST')then
+	if(!type ne 'GPWL' and !type ne 'GPSET' and !type ne 'SITE' and !type ne 'ZONE' and !type ne 'PIPE' and !type ne 'EQUI' and !type ne 'STRU' and !type ne 'HVAC' and !type ne 'REST' and !type ne 'FRMW' and !type ne 'SBFR' and !type ne 'SCTN' and !type ne 'GENSEC')then
 		return
 	endif
 	!drawList	=	!this.listDrawList.dtext
@@ -1410,7 +1410,7 @@ endmethod
 --添加drawlist
 define method .MethodAddRemoveListMember()
 	!type = !!ce.type
-	if(!type ne 'GPWL' and !type ne 'GPSET' and !type ne 'SITE' and !type ne 'ZONE' and !type ne 'PIPE' and !type ne 'EQUI' and !type ne 'STRU' and !type ne 'HVAC' and !type ne 'REST')then
+	if(!type ne 'GPWL' and !type ne 'GPSET' and !type ne 'SITE' and !type ne 'ZONE' and !type ne 'PIPE' and !type ne 'EQUI' and !type ne 'STRU' and !type ne 'HVAC' and !type ne 'REST' and !type ne 'FRMW' and !type ne 'SBFR' and !type ne 'SCTN' and !type ne 'GENSEC')then
 		return
 	endif
 	!drawList	=	!this.listRemoveList.dtext

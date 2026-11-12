@@ -166,7 +166,11 @@ define method .GeneratePipeLayout()
 	do !i indices !list
 		!percent = !i / !list.size() * 100
 		!!fmsys.SETPROGRESS(!percent)
-		!name = !list[$!i].flnn
+		!name = ''
+		!name = !list[$!i].namn
+		handle any
+			!name = !list[$!i].flnn
+		endhandle
 		!nameList = !name.split('-')
 		do !j indices !nameList
 			if(!j eq 1)then
@@ -584,7 +588,11 @@ define method .GenerateInstLayout()
 	do !i indices !list
 		!percent = !i / !list.size() * 100
 		!!fmsys.SETPROGRESS(!percent)
-		!name = !list[$!i].flnn
+		!name = ''
+		!name = !list[$!i].namn
+		handle any
+			!name = !list[$!i].flnn
+		endhandle
 		!nameList = !name.split('-')
 		do !j indices !nameList
 			if(!j eq 1)then
@@ -2841,13 +2849,9 @@ define method .BuildObstacles()
 	--① 管线中线
 	!tubi = !ldg.GetDrawListElement('TUBI')
 	do !i indices !tubi
-		!a = !tubi[$!i].apos
-		!b = !tubi[$!i].lpos
-		!x1 = !a.east * !sc + !ce
-		!y1 = !a.north * !sc + !cn
-		!x2 = !b.east * !sc + !ce
-		!y2 = !b.north * !sc + !cn
-		!this.AddObstacle(!x1,!y1,!x2,!y2,3,!this.penGeomPipe)
+		--【按你的要求】管线改为包围箱（原来只记中线线段）
+		!tv = object volume(!tubi[$!i])
+		!this.AddBoxObstacle(!tv.from.east,!tv.from.north,!tv.to.east,!tv.to.north,1,!this.penGeomPipe)
 	enddo
 	--② 设备轮廓（四条边）
 	--【2026-10-31·按你的要求】设备：取**EQUI 包围盒 ∩ 视图范围**，
@@ -2855,7 +2859,8 @@ define method .BuildObstacles()
 	--【2026-11-01·按你的要求·回退为性能】设备取数回到 GetDrawListElement('EQUI')：
 	--   EquisFromView() 要逐个 ADDE scope 跑 coll all equi，场景大时慢；局部指标上
 	--   整体包围盒 × equiShrink 已经够用。
-	!equis = !ldg.GetDrawListElement('EQUI')
+	--【按你的要求·只做 4 类】设备不做包围箱
+	!equis = object array()
 	do !i indices !equis
 		--【2026-10-31·按你的要求】设备不再用“整体包围盒 × 比例”，而是**取它里面各个基本体的包围盒集合**；
 		--   一个基本体一个矩形，比一个大盒子贴合得多（平台/梯子不会拊进来）。
@@ -2886,19 +2891,32 @@ define method .BuildObstacles()
 	enddo
 	--【2026-10-31·按你的要求】管件也要避开：ELBO(弯头) / PCOM / TEE(三通) / REDU(异径) / FILT(过滤器)，
 	--   与 VALV 同一套取法（包围盒四边）和同一级别的惩罚。
+	--【按你的要求】管件：PCOM / ELBO（弯头）/ TEE（三通）
 	!fitTypes = object array()
-	!fitTypes[1] = 'ELBO'
-	!fitTypes[2] = 'PCOM'
+	!fitTypes[1] = 'PCOM'
+	!fitTypes[2] = 'ELBO'
 	!fitTypes[3] = 'TEE'
-	!fitTypes[4] = 'REDU'
-	!fitTypes[5] = 'FILT'
+	--【进度条·2026-11-10】取管件 + 生成包围箱：按「类型进度 + 类内每 10%」更新，避免界面往返
+	!nFit = !fitTypes.size()
+	!fitIdx = 0
 	do !fk indices !fitTypes
+		!fitIdx = !fitIdx + 1
+		!!fmsys.SETPROGRESSTEXT('Building pipe fitting obstacles ...')
+		!!fmsys.SETPROGRESS((!fitIdx - 1) / !nFit * 100)
 		!fits = !ldg.GetDrawListElement(!fitTypes[$!fk])
+		!nFits = !fits.size()
+		!fitFrac = -0.1
 		do !i indices !fits
+			!fitCur = !i / !nFits
+			if(!fitCur ge !fitFrac)then
+				!fitFrac = !fitFrac + 0.1
+				!!fmsys.SETPROGRESS(((!fitIdx - 1) + !fitCur) / !nFit * 100)
+			endif
 			!fv = object volume(!fits[$!i])
 			!this.AddBoxObstacle(!fv.from.east,!fv.from.north,!fv.to.east,!fv.to.north,2,!this.penGeomValv)
 		enddo
 	enddo
+	!!fmsys.SETPROGRESS(0)
 	!this.obsReady = true
 endmethod
 --------------------------------------------------------------------------------------
